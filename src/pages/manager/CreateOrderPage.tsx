@@ -33,6 +33,9 @@ import {
   MessageCircle,
   Columns3,
   Table,
+  Zap,
+  Sparkles,
+  Copy,
 } from 'lucide-react';
 import { RealWhatsAppWebView } from '../../components/RealWhatsAppWebView';
 import { useSettings } from '../../context/SettingsContext';
@@ -174,6 +177,13 @@ export const CreateOrderPage: React.FC = () => {
   const [selfOrderModalRow, setSelfOrderModalRow] = useState<OrderRow | null>(null);
   const [selfOrderPendingField, setSelfOrderPendingField] = useState<'kubbus' | 'romali' | 'cash' | 'gpay' | null>(null);
   const [unlockedSelfOrderIds, setUnlockedSelfOrderIds] = useState<Set<string>>(new Set());
+
+  // Auto Data Entry / Bulk Assistant Modal State
+  const [isAutoEntryModalOpen, setIsAutoEntryModalOpen] = useState(false);
+  const [autoKubbusQty, setAutoKubbusQty] = useState('10');
+  const [autoRomaliQty, setAutoRomaliQty] = useState('5');
+  const [autoTargetMode, setAutoTargetMode] = useState<'visible' | 'all' | 'empty'>('visible');
+  const [isAutoLoading, setIsAutoLoading] = useState(false);
 
   // New Customer Modal
   const [isNewCustModalOpen, setIsNewCustModalOpen] = useState(false);
@@ -1022,6 +1032,120 @@ export const CreateOrderPage: React.FC = () => {
     }
   };
 
+  // Auto-Fill from Previous Orders (Smart 1-Click Historic Auto Data Entry)
+  const handleAutoFillPreviousOrders = async () => {
+    try {
+      setIsAutoLoading(true);
+      setError(null);
+      const allOrders = await orderService.getOrders({ all: 'true' });
+      const latestOrderMap: Record<string, { kubbusQty: number; romaliQty: number }> = {};
+      
+      const sorted = [...allOrders].sort((a, b) => new Date(b.order_date).getTime() - new Date(a.order_date).getTime());
+      
+      for (const ord of sorted) {
+        if (!ord.customer || latestOrderMap[ord.customer]) continue;
+        let kQty = 0;
+        let rQty = 0;
+        for (const it of ord.items || []) {
+          const pName = (it.product_details?.name || '').toLowerCase();
+          if (pName.includes('kubbus') || it.product === kubbusProduct?.id) {
+            kQty += it.quantity;
+          } else if (pName.includes('romali') || it.product === romaliProduct?.id) {
+            rQty += it.quantity;
+          }
+        }
+        if (kQty > 0 || rQty > 0) {
+          latestOrderMap[ord.customer] = { kubbusQty: kQty, romaliQty: rQty };
+        }
+      }
+
+      let filledCount = 0;
+      setRows((prev) =>
+        prev.map((r) => {
+          const match = r.customerId ? latestOrderMap[r.customerId] : null;
+          if (match) {
+            filledCount++;
+            return {
+              ...r,
+              kubbusQty: match.kubbusQty > 0 ? String(match.kubbusQty) : r.kubbusQty,
+              romaliQty: match.romaliQty > 0 ? String(match.romaliQty) : r.romaliQty,
+              status: 'IDLE',
+            };
+          }
+          return r;
+        })
+      );
+
+      setIsAutoEntryModalOpen(false);
+      setSuccessBanner(`Auto-filled ${filledCount} shops with their previous order quantities!`);
+      setTimeout(() => setSuccessBanner(null), 4000);
+    } catch (err: unknown) {
+      setError('Failed to fetch previous orders for auto data entry.');
+    } finally {
+      setIsAutoLoading(false);
+    }
+  };
+
+  // Quick Bulk Fill Custom Fixed Quantities
+  const handleQuickBulkApply = () => {
+    const kVal = autoKubbusQty.trim();
+    const rVal = autoRomaliQty.trim();
+    const visibleRowIds = new Set(visibleRows.map((r) => r.rowId));
+
+    let updatedCount = 0;
+    setRows((prev) =>
+      prev.map((r) => {
+        const isTarget =
+          autoTargetMode === 'all'
+            ? true
+            : autoTargetMode === 'visible'
+            ? visibleRowIds.has(r.rowId)
+            : !r.kubbusQty && !r.romaliQty;
+
+        if (isTarget && r.customerId) {
+          updatedCount++;
+          return {
+            ...r,
+            kubbusQty: kVal !== '' ? kVal : r.kubbusQty,
+            romaliQty: rVal !== '' ? rVal : r.romaliQty,
+            status: 'IDLE',
+          };
+        }
+        return r;
+      })
+    );
+
+    setIsAutoEntryModalOpen(false);
+    setSuccessBanner(`Auto-filled quantities across ${updatedCount} shops!`);
+    setTimeout(() => setSuccessBanner(null), 3500);
+  };
+
+  // Sandbox Demo Simulation Auto Data Entry
+  const handleAutoFillSandboxRandom = () => {
+    const kPresets = [10, 15, 20, 25, 30, 40, 50];
+    const rPresets = [5, 10, 15, 20, 25];
+
+    let filledCount = 0;
+    setRows((prev) =>
+      prev.map((r) => {
+        if (!r.customerId) return r;
+        filledCount++;
+        const randK = kPresets[Math.floor(Math.random() * kPresets.length)];
+        const randR = rPresets[Math.floor(Math.random() * rPresets.length)];
+        return {
+          ...r,
+          kubbusQty: String(randK),
+          romaliQty: String(randR),
+          status: 'IDLE',
+        };
+      })
+    );
+
+    setIsAutoEntryModalOpen(false);
+    setSuccessBanner(`Sandbox Auto-Entry: Simulated wholesale quantities for ${filledCount} shops!`);
+    setTimeout(() => setSuccessBanner(null), 3500);
+  };
+
   // Submit All Orders (Creates new orders or updates existing ones, with auto-confirm to driver!)
   const handleSubmitAllOrders = async () => {
     const ordersToSubmit = rows
@@ -1346,6 +1470,27 @@ export const CreateOrderPage: React.FC = () => {
             <Truck size={15} color={autoConfirmDriver ? '#dc2626' : 'var(--text-muted)'} />
             <span>Confirm to Driver</span>
           </label>
+
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setIsAutoEntryModalOpen(true)}
+            style={{
+              height: '34px',
+              padding: '0 0.75rem',
+              fontWeight: 700,
+              background: '#fef3c7',
+              color: '#b45309',
+              borderColor: '#fde68a',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.35rem',
+            }}
+            title="Auto-fill order quantities from yesterday's orders or bulk presets"
+          >
+            <Zap size={15} color="#d97706" />
+            <span>Auto Entry</span>
+          </button>
 
           <button
             type="button"
@@ -2895,6 +3040,28 @@ export const CreateOrderPage: React.FC = () => {
             <button
               type="button"
               className="btn btn-secondary btn-sm"
+              onClick={() => setIsAutoEntryModalOpen(true)}
+              style={{
+                height: '28px',
+                padding: '0 0.6rem',
+                fontSize: '0.75rem',
+                fontWeight: 700,
+                background: '#fef3c7',
+                color: '#b45309',
+                borderColor: '#fde68a',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.3rem',
+              }}
+              title="Auto-fill previous orders or bulk preset quantities"
+            >
+              <Zap size={12} color="#d97706" />
+              <span>⚡ Auto Entry</span>
+            </button>
+
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
               onClick={handleResetInputs}
               style={{ height: '28px', padding: '0 0.55rem', fontSize: '0.75rem' }}
               title="Reset all entered numbers"
@@ -2927,6 +3094,244 @@ export const CreateOrderPage: React.FC = () => {
         </div>
       </div>
       </div>
+
+      {/* 4.5 Auto Data Entry & Bulk Assistant Modal */}
+      {isAutoEntryModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.55)',
+            backdropFilter: 'blur(3px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '1rem',
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              padding: '1.5rem',
+              width: '100%',
+              maxWidth: '540px',
+              boxShadow: 'var(--shadow-lg)',
+              borderRadius: '12px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                <div
+                  style={{
+                    background: '#fef3c7',
+                    color: '#d97706',
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Zap size={20} />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '1.18rem', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>
+                    ⚡ Auto Data Entry Assistant
+                  </h3>
+                  <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                    Instantly fill wholesale quantities across {visibleRows.length} shops
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn-icon"
+                onClick={() => setIsAutoEntryModalOpen(false)}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Option 1: Smart History Repeat */}
+            <div
+              style={{
+                background: '#f0fdf4',
+                border: '1.5px solid #86efac',
+                borderRadius: '10px',
+                padding: '1rem',
+                marginBottom: '1rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '1rem',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 800, fontSize: '0.92rem', color: '#15803d', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  <Copy size={15} />
+                  <span>Auto-Repeat Previous Day's Orders</span>
+                </div>
+                <div style={{ fontSize: '0.78rem', color: '#166534', marginTop: '0.2rem', lineHeight: 1.3 }}>
+                  Copies the most recent order quantities for each matching shop directly into today's sheet.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={handleAutoFillPreviousOrders}
+                disabled={isAutoLoading}
+                style={{
+                  background: '#16a34a',
+                  borderColor: '#16a34a',
+                  color: '#ffffff',
+                  fontWeight: 800,
+                  whiteSpace: 'nowrap',
+                  padding: '0.45rem 0.85rem',
+                  height: 'auto',
+                }}
+              >
+                {isAutoLoading ? 'Loading...' : '⚡ Auto Fill'}
+              </button>
+            </div>
+
+            {/* Option 2: Quick Bulk Fill Custom Values */}
+            <div
+              style={{
+                background: 'var(--bg-main)',
+                border: '1px solid var(--border)',
+                borderRadius: '10px',
+                padding: '1rem',
+                marginBottom: '1rem',
+              }}
+            >
+              <div style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--text-primary)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <Sparkles size={15} color="var(--primary)" />
+                <span>Bulk Set Preset Quantities</span>
+              </div>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                <div>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
+                    Kubbus Qty (pkts)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    className="form-input"
+                    value={autoKubbusQty}
+                    onChange={(e) => setAutoKubbusQty(e.target.value)}
+                    placeholder="e.g. 10"
+                    style={{ fontWeight: 700 }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
+                    Romali Qty (pkts)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    className="form-input"
+                    value={autoRomaliQty}
+                    onChange={(e) => setAutoRomaliQty(e.target.value)}
+                    placeholder="e.g. 5"
+                    style={{ fontWeight: 700 }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.78rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '3px', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="autoTarget"
+                      checked={autoTargetMode === 'visible'}
+                      onChange={() => setAutoTargetMode('visible')}
+                    />
+                    <span>Visible ({visibleRows.length})</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '3px', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="autoTarget"
+                      checked={autoTargetMode === 'empty'}
+                      onChange={() => setAutoTargetMode('empty')}
+                    />
+                    <span>Empty Only</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '3px', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="autoTarget"
+                      checked={autoTargetMode === 'all'}
+                      onChange={() => setAutoTargetMode('all')}
+                    />
+                    <span>All Shops ({rows.length})</span>
+                  </label>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={handleQuickBulkApply}
+                  style={{ fontWeight: 800, padding: '0.35rem 0.85rem' }}
+                >
+                  Apply Preset
+                </button>
+              </div>
+            </div>
+
+            {/* Option 3: Sandbox / Demo Mode */}
+            <div
+              style={{
+                background: '#f8fafc',
+                border: '1px dashed #cbd5e1',
+                borderRadius: '10px',
+                padding: '0.85rem 1rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.75rem',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                  🎲 Sandbox Demo Simulation
+                </div>
+                <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                  Generates realistic varied quantities across shops for instant testing.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleAutoFillSandboxRandom}
+                style={{ fontSize: '0.76rem', fontWeight: 700, padding: '0.3rem 0.65rem' }}
+              >
+                Simulate Demo
+              </button>
+            </div>
+
+            <div style={{ marginTop: '1.25rem', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setIsAutoEntryModalOpen(false)}
+                style={{ padding: '0.45rem 1rem' }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 5. New Shop Modal */}
       {isNewCustModalOpen && (
