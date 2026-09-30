@@ -567,11 +567,6 @@ export const CreateOrderPage: React.FC = () => {
 
   // Handle cell value change (resets SAVED status to IDLE so edited row can be saved/updated!)
   const handleCellChange = (rowId: string, field: keyof OrderRow, value: string) => {
-    if (!dayStatus?.is_opened) {
-      setIsOpenDayModalOpen(true);
-      return;
-    }
-
     const targetRow = rows.find((r) => r.rowId === rowId);
     if (targetRow && targetRow.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(rowId)) {
       setSelfOrderModalRow(targetRow);
@@ -596,10 +591,6 @@ export const CreateOrderPage: React.FC = () => {
 
   // Apply quantities from WhatsApp chat directly into the billing row
   const handleApplyWhatsAppOrder = (customerId: string, kubbus: string, romali: string) => {
-    if (!dayStatus?.is_opened) {
-      setIsOpenDayModalOpen(true);
-      return;
-    }
     setRows((prev) =>
       prev.map((r) => {
         if (r.customerId === customerId) {
@@ -614,6 +605,194 @@ export const CreateOrderPage: React.FC = () => {
       })
     );
     setSelectedCustomerId(customerId);
+  };
+
+  // Calculate financials for a row
+  const getRowFinancials = (row: OrderRow) => {
+    const kQty = parseInt(row.kubbusQty, 10) || 0;
+    const rQty = parseInt(row.romaliQty, 10) || 0;
+
+    const kPrice = pricingCache[row.customerId]?.kubbusPrice ?? defaultKubbusPrice;
+    const rPrice = pricingCache[row.customerId]?.romaliPrice ?? defaultRomaliPrice;
+
+    const rowTotal = kQty * kPrice + rQty * rPrice;
+    const cash = parseFloat(row.cashAmount) || 0;
+    const gpay = parseFloat(row.gpayAmount) || 0;
+    const rowPaid = cash + gpay;
+    const prevDue = parseFloat(row.customerBalance || '0') || 0;
+    // Current Outstanding Balance = Previous Due + Today's Order Bill - Today's Payments (Cash + GPay)
+    const rowBalance = prevDue + rowTotal - rowPaid;
+
+    return {
+      kQty,
+      rQty,
+      kPrice,
+      rPrice,
+      rowTotal,
+      cash,
+      gpay,
+      rowPaid,
+      prevDue,
+      rowBalance,
+      hasOrder: kQty > 0 || rQty > 0,
+      isValid: Boolean(row.customerId) && (kQty > 0 || rQty > 0 || cash > 0 || gpay > 0),
+    };
+  };
+
+  // Select customer for a custom row or existing row
+  const handleSelectCustomerForRow = (rowId: string, customerId: string) => {
+    const cust = customers.find((c) => c.id === customerId);
+    if (!cust) return;
+
+    const custRouteId = cust.route || cust.route_details?.id || '';
+    const custRouteName = cust.route_details?.name || routes.find((r) => r.id === custRouteId)?.name || '';
+    const routeDriver = drivers.find(
+      (d) =>
+        (d.assigned_route === custRouteId ||
+          d.assigned_route_details?.id === custRouteId ||
+          (custRouteName && d.assigned_route_details?.name && d.assigned_route_details.name.toLowerCase() === custRouteName.toLowerCase())) &&
+        d.is_active
+    );
+
+    setRows((prev) =>
+      prev.map((r) =>
+        r.rowId === rowId
+          ? {
+              ...r,
+              customerId: cust.id,
+              customerName: cust.name,
+              customerOwner: cust.owner_name || '',
+              customerRouteId: custRouteId,
+              customerRoute: custRouteName,
+              customerBalance: cust.current_balance,
+              driverId: routeDriver?.id,
+              driverName: routeDriver?.user_details?.first_name
+                ? `${routeDriver.user_details.first_name} ${routeDriver.user_details.last_name || ''}`
+                : routeDriver?.driver_name,
+            }
+          : r
+      )
+    );
+    fetchCustomerPricing(cust.id);
+  };
+
+  // Save an individual row immediately to database
+  const handleSaveSingleRow = async (rowId: string) => {
+    const row = rows.find((r) => r.rowId === rowId);
+    if (!row) return;
+    const fin = getRowFinancials(row);
+    if (!row.customerId) {
+      setError('Please select a customer shop for this row before saving.');
+      return;
+    }
+    if (!fin.hasOrder && fin.cash <= 0 && fin.gpay <= 0) {
+      setError(`Please enter quantities or payment for ${row.customerName || 'the shop'} before saving.`);
+      return;
+    }
+
+    try {
+      setRows((prev) =>
+        prev.map((r) => (r.rowId === rowId ? { ...r, status: 'SAVING', errorMessage: undefined } : r))
+      );
+
+      const cust = customers.find((c) => c.id === row.customerId);
+      const routeDriver = drivers.find(
+        (d) =>
+          (d.assigned_route === cust?.route ||
+            d.assigned_route_details?.id === cust?.route ||
+            d.assigned_route_details?.name === cust?.route_details?.name) &&
+          d.is_active
+      );
+
+      const assignedDriverId = autoConfirmDriver ? routeDriver?.id || null : null;
+
+      const items: Array<{ product_id: string; quantity: number; unit_price: string }> = [];
+      if (fin.kQty > 0 && kubbusProduct) {
+        items.push({
+          product_id: kubbusProduct.id,
+          quantity: fin.kQty,
+          unit_price: fin.kPrice.toFixed(2),
+        });
+      }
+      if (fin.rQty > 0 && romaliProduct) {
+        items.push({
+          product_id: romaliProduct.id,
+          quantity: fin.rQty,
+          unit_price: fin.rPrice.toFixed(2),
+        });
+      }
+
+      let order: Order | undefined;
+
+      if (items.length > 0) {
+        if (row.orderId) {
+          order = await orderService.updateOrder(row.orderId, {
+            items,
+            driver_id: assignedDriverId,
+            notes: 'Fast wholesale daily entry (updated)',
+          });
+        } else {
+          order = await orderService.createOrder({
+            customer_id: row.customerId,
+            driver_id: assignedDriverId,
+            order_date: orderDate,
+            items,
+            notes: 'Fast wholesale daily entry',
+          });
+        }
+      }
+
+      if (fin.cash > 0) {
+        await paymentService.recordPayment({
+          customer_id: row.customerId,
+          amount: fin.cash.toFixed(2),
+          payment_method: 'CASH',
+          order_id: order?.id || row.orderId,
+          notes: order ? `Cash collection for Order #${order.order_number}` : 'Wholesale counter cash payment',
+        });
+      }
+
+      if (fin.gpay > 0) {
+        await paymentService.recordPayment({
+          customer_id: row.customerId,
+          amount: fin.gpay.toFixed(2),
+          payment_method: 'GPAY_UPI',
+          order_id: order?.id || row.orderId,
+          notes: order ? `GPay collection for Order #${order.order_number}` : 'Wholesale counter GPay payment',
+        });
+      }
+
+      setRows((prev) =>
+        prev.map((r) =>
+          r.rowId === rowId
+            ? {
+                ...r,
+                status: 'SAVED',
+                orderId: order?.id || r.orderId,
+                orderNumber: order?.order_number || r.orderNumber,
+                driverId: order?.driver || assignedDriverId || r.driverId || undefined,
+                driverName: order?.driver_name || routeDriver?.driver_name || r.driverName || undefined,
+              }
+            : r
+        )
+      );
+
+      setSuccessBanner(`Saved order for ${row.customerName} successfully!`);
+      setTimeout(() => setSuccessBanner(null), 3500);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Order creation failed';
+      setRows((prev) =>
+        prev.map((r) =>
+          r.rowId === rowId
+            ? {
+                ...r,
+                status: 'ERROR',
+                errorMessage: msg,
+              }
+            : r
+        )
+      );
+    }
   };
 
   // Close search dropdown on outside click
@@ -697,38 +876,6 @@ export const CreateOrderPage: React.FC = () => {
     setRows((prev) => [...prev, ...restoredRows]);
   };
 
-  // Calculate financials for a row
-  const getRowFinancials = (row: OrderRow) => {
-    const kQty = parseInt(row.kubbusQty, 10) || 0;
-    const rQty = parseInt(row.romaliQty, 10) || 0;
-
-    const kPrice = pricingCache[row.customerId]?.kubbusPrice ?? defaultKubbusPrice;
-    const rPrice = pricingCache[row.customerId]?.romaliPrice ?? defaultRomaliPrice;
-
-    const rowTotal = kQty * kPrice + rQty * rPrice;
-    const cash = parseFloat(row.cashAmount) || 0;
-    const gpay = parseFloat(row.gpayAmount) || 0;
-    const rowPaid = cash + gpay;
-    const prevDue = parseFloat(row.customerBalance || '0') || 0;
-    // Current Outstanding Balance = Previous Due + Today's Order Bill - Today's Payments (Cash + GPay)
-    const rowBalance = prevDue + rowTotal - rowPaid;
-
-    return {
-      kQty,
-      rQty,
-      kPrice,
-      rPrice,
-      rowTotal,
-      cash,
-      gpay,
-      rowPaid,
-      prevDue,
-      rowBalance,
-      hasOrder: kQty > 0 || rQty > 0,
-      isValid: Boolean(row.customerId) && (kQty > 0 || rQty > 0 || cash > 0 || gpay > 0),
-    };
-  };
-
   // KPI Summary Statistics
   const sheetStats = useMemo(() => {
     return rows.reduce(
@@ -785,12 +932,6 @@ export const CreateOrderPage: React.FC = () => {
     visibleIndex: number,
     col: 'kubbus' | 'romali' | 'cash' | 'gpay'
   ) => {
-    if (!dayStatus?.is_opened) {
-      e.preventDefault();
-      setIsOpenDayModalOpen(true);
-      return;
-    }
-
     if (e.key === 'Enter') {
       e.preventDefault();
       if (col === 'kubbus') {
@@ -908,6 +1049,17 @@ export const CreateOrderPage: React.FC = () => {
       );
 
       try {
+        if (!row.customerId) {
+          setRows((prev) =>
+            prev.map((r) =>
+              r.rowId === row.rowId
+                ? { ...r, status: 'ERROR', errorMessage: 'Please select a customer shop for this row.' }
+                : r
+            )
+          );
+          continue;
+        }
+
         const cust = customers.find((c) => c.id === row.customerId);
         const routeDriver = drivers.find(
           (d) =>
@@ -1198,56 +1350,52 @@ export const CreateOrderPage: React.FC = () => {
           <button
             type="button"
             className="btn btn-secondary btn-sm"
-            onClick={() => {
-              if (!dayStatus?.is_opened) {
-                setIsOpenDayModalOpen(true);
-                return;
-              }
-              setIsNewCustModalOpen(true);
-            }}
+            onClick={() => setIsNewCustModalOpen(true)}
             style={{ height: '34px', padding: '0 0.75rem' }}
           >
             <UserPlus size={15} />
             <span>New Shop</span>
           </button>
 
-          {!dayStatus?.is_opened ? (
+          {!dayStatus?.is_opened && (
             <button
               type="button"
-              className="btn btn-primary btn-sm"
+              className="btn btn-secondary btn-sm"
               onClick={() => setIsOpenDayModalOpen(true)}
               style={{
                 height: '34px',
-                padding: '0 1rem',
-                fontWeight: 800,
-                background: '#dc2626',
-                borderColor: '#dc2626',
+                padding: '0 0.75rem',
+                fontWeight: 700,
+                color: '#b45309',
+                borderColor: '#fcd34d',
+                background: '#fffbeb',
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '0.4rem',
               }}
+              title="Record opening cash float for business day"
             >
               <Sunrise size={15} />
-              <span>Open Day to Enter Orders</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={isSubmittingAll || pendingOrdersCount === 0}
-              onClick={handleSubmitAllOrders}
-              style={{ height: '34px', padding: '0 1rem', fontWeight: 800 }}
-            >
-              <Save size={15} />
-              <span>
-                {isSubmittingAll
-                  ? `Submitting (${submitProgress?.current}/${submitProgress?.total})...`
-                  : pendingOrdersCount > 0
-                  ? `Submit Orders (${pendingOrdersCount}) • ${formatCurrency(sheetStats.totalBill)}`
-                  : 'All Orders Saved'}
-              </span>
+              <span>Open Day</span>
             </button>
           )}
+
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={isSubmittingAll || pendingOrdersCount === 0}
+            onClick={handleSubmitAllOrders}
+            style={{ height: '34px', padding: '0 1rem', fontWeight: 800 }}
+          >
+            <Save size={15} />
+            <span>
+              {isSubmittingAll
+                ? `Submitting (${submitProgress?.current}/${submitProgress?.total})...`
+                : pendingOrdersCount > 0
+                ? `Submit Orders (${pendingOrdersCount}) • ${formatCurrency(sheetStats.totalBill)}`
+                : 'All Orders Saved'}
+            </span>
+          </button>
         </div>
       </div>
 
@@ -1689,10 +1837,10 @@ export const CreateOrderPage: React.FC = () => {
             <Sun size={20} color="#b45309" />
             <div>
               <span style={{ fontSize: '0.86rem', fontWeight: 800 }}>
-                Business Day ({orderDate}) is NOT OPENED.
+                Business Day ({orderDate}) is Not Yet Opened
               </span>
               <span style={{ fontSize: '0.78rem', color: '#b45309', display: 'block' }}>
-                Wholesale data entry is locked. You must record the opening cash float to begin entering orders.
+                You can enter and save wholesale orders directly. Click Open Day to record your morning cash float.
               </span>
             </div>
           </div>
@@ -1701,8 +1849,8 @@ export const CreateOrderPage: React.FC = () => {
             className="btn btn-primary btn-sm"
             onClick={() => setIsOpenDayModalOpen(true)}
             style={{
-              background: '#dc2626',
-              borderColor: '#dc2626',
+              background: '#b45309',
+              borderColor: '#b45309',
               display: 'inline-flex',
               alignItems: 'center',
               gap: '0.4rem',
@@ -1713,7 +1861,7 @@ export const CreateOrderPage: React.FC = () => {
             }}
           >
             <Sunrise size={15} />
-            <span>Open Business Day Now</span>
+            <span>Open Day Cash Float</span>
           </button>
         </div>
       )}
@@ -2127,134 +2275,188 @@ export const CreateOrderPage: React.FC = () => {
                       </td>
 
                       {/* Shop Name */}
-                      <td style={{ padding: '0.4rem 0.65rem', minWidth: '180px', maxWidth: '240px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.35rem', flexWrap: 'wrap' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', minWidth: 0, flexWrap: 'wrap' }}>
-                            <div style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.86rem', lineHeight: 1.25, wordBreak: 'break-word' }}>
-                              {row.customerName || 'Walk-in Customer'}
-                            </div>
-                            {isWhatsAppEnabled && activeCustomer?.id === row.customerId && (
-                              <span
-                                title="Active in WhatsApp panel"
-                                style={{
-                                  fontSize: '0.64rem',
-                                  background: '#dcfce7',
-                                  color: '#15803d',
-                                  padding: '0.08rem 0.35rem',
-                                  borderRadius: '4px',
-                                  fontWeight: 800,
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '2px',
-                                  border: '1px solid #86efac',
-                                  whiteSpace: 'nowrap',
-                                }}
-                              >
-                                💬 WhatsApp
-                              </span>
-                            )}
-                          </div>
-                          {row.customerId && isSelfOrderEnabled && (
-                            <a
-                              href={`/customer/${row.customerId}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              title="Open Customer Self-Order Screen"
+                      <td style={{ padding: '0.4rem 0.65rem', minWidth: '180px', maxWidth: '260px' }}>
+                        {row.isCustomRow && !row.customerId ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                            <select
+                              className="form-input"
+                              value={row.customerId}
+                              onChange={(e) => handleSelectCustomerForRow(row.rowId, e.target.value)}
                               style={{
-                                color: '#059669',
-                                fontSize: '0.67rem',
-                                fontWeight: 600,
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '0.15rem',
-                                textDecoration: 'none',
-                                background: '#ecfdf5',
-                                border: '1px solid #a7f3d0',
-                                padding: '0.08rem 0.35rem',
-                                borderRadius: '4px',
-                                flexShrink: 0,
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              <ExternalLink size={10} />
-                              <span>Self-Order</span>
-                            </a>
-                          )}
-                        </div>
-                        {row.orderSource === 'CUSTOMER_LINK' && (
-                          <div style={{ marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                            <span
-                              className="badge badge-success"
-                              style={{
-                                fontSize: '0.68rem',
-                                padding: '0.12rem 0.45rem',
-                                background: '#dcfce7',
-                                color: '#15803d',
-                                border: '1px solid #86efac',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
+                                fontSize: '0.82rem',
+                                padding: '0.2rem 0.4rem',
+                                height: '30px',
                                 fontWeight: 700,
-                                whiteSpace: 'nowrap',
+                                borderColor: '#f59e0b',
+                                backgroundColor: '#fffbeb',
                               }}
                             >
-                              <Smartphone size={10} />
-                              <span>Customer Self-Order</span>
-                            </span>
+                              <option value="">-- Select Customer Shop --</option>
+                              {customers.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name} {c.owner_name ? `(${c.owner_name})` : ''} {c.route_details?.name ? `• ${c.route_details.name}` : ''}
+                                </option>
+                              ))}
+                            </select>
+                            <span style={{ fontSize: '0.68rem', color: '#b45309' }}>Select a shop for this custom row</span>
+                          </div>
+                        ) : (
+                          <>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.35rem', flexWrap: 'wrap' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', minWidth: 0, flexWrap: 'wrap' }}>
+                                <div style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.86rem', lineHeight: 1.25, wordBreak: 'break-word' }}>
+                                  {row.customerName || 'Walk-in Customer'}
+                                </div>
+                                {row.isCustomRow && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRows((prev) =>
+                                        prev.map((r) =>
+                                          r.rowId === row.rowId
+                                            ? { ...r, customerId: '', customerName: '', customerOwner: '', customerRoute: 'Walk-in / Custom', customerBalance: '0' }
+                                            : r
+                                        )
+                                      );
+                                    }}
+                                    style={{
+                                      fontSize: '0.62rem',
+                                      padding: '0.05rem 0.3rem',
+                                      background: '#fef3c7',
+                                      color: '#b45309',
+                                      border: '1px solid #fde68a',
+                                      borderRadius: '3px',
+                                      cursor: 'pointer',
+                                    }}
+                                    title="Change customer shop"
+                                  >
+                                    Change
+                                  </button>
+                                )}
+                                {isWhatsAppEnabled && activeCustomer?.id === row.customerId && (
+                                  <span
+                                    title="Active in WhatsApp panel"
+                                    style={{
+                                      fontSize: '0.64rem',
+                                      background: '#dcfce7',
+                                      color: '#15803d',
+                                      padding: '0.08rem 0.35rem',
+                                      borderRadius: '4px',
+                                      fontWeight: 800,
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '2px',
+                                      border: '1px solid #86efac',
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    💬 WhatsApp
+                                  </span>
+                                )}
+                              </div>
+                              {row.customerId && isSelfOrderEnabled && (
+                                <a
+                                  href={`/customer/${row.customerId}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="Open Customer Self-Order Screen"
+                                  style={{
+                                    color: '#059669',
+                                    fontSize: '0.67rem',
+                                    fontWeight: 600,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.15rem',
+                                    textDecoration: 'none',
+                                    background: '#ecfdf5',
+                                    border: '1px solid #a7f3d0',
+                                    padding: '0.08rem 0.35rem',
+                                    borderRadius: '4px',
+                                    flexShrink: 0,
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  <ExternalLink size={10} />
+                                  <span>Self-Order</span>
+                                </a>
+                              )}
+                            </div>
+                            {row.orderSource === 'CUSTOMER_LINK' && (
+                              <div style={{ marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                <span
+                                  className="badge badge-success"
+                                  style={{
+                                    fontSize: '0.68rem',
+                                    padding: '0.12rem 0.45rem',
+                                    background: '#dcfce7',
+                                    color: '#15803d',
+                                    border: '1px solid #86efac',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px',
+                                    fontWeight: 700,
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  <Smartphone size={10} />
+                                  <span>Customer Self-Order</span>
+                                </span>
 
-                            {unlockedSelfOrderIds.has(row.rowId) ? (
-                              <span
-                                style={{
-                                  fontSize: '0.68rem',
-                                  padding: '0.12rem 0.45rem',
-                                  background: '#fef3c7',
-                                  color: '#b45309',
-                                  border: '1px solid #fde68a',
-                                  borderRadius: '4px',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '3px',
-                                  fontWeight: 700,
-                                  whiteSpace: 'nowrap',
-                                }}
-                              >
-                                <Edit size={10} />
-                                <span>Unlocked</span>
-                              </span>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelfOrderModalRow(row);
-                                  setSelfOrderPendingField('kubbus');
-                                }}
-                                style={{
-                                  fontSize: '0.68rem',
-                                  padding: '0.12rem 0.45rem',
-                                  background: '#ffffff',
-                                  color: '#047857',
-                                  border: '1px solid #10b981',
-                                  borderRadius: '4px',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '3px',
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                  boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                                  whiteSpace: 'nowrap',
-                                }}
-                                title="Click to unlock and edit this customer self-order"
-                              >
-                                <Edit size={10} />
-                                <span>Edit Order</span>
-                              </button>
+                                {unlockedSelfOrderIds.has(row.rowId) ? (
+                                  <span
+                                    style={{
+                                      fontSize: '0.68rem',
+                                      padding: '0.12rem 0.45rem',
+                                      background: '#fef3c7',
+                                      color: '#b45309',
+                                      border: '1px solid #fde68a',
+                                      borderRadius: '4px',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
+                                      fontWeight: 700,
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    <Edit size={10} />
+                                    <span>Unlocked</span>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelfOrderModalRow(row);
+                                      setSelfOrderPendingField('kubbus');
+                                    }}
+                                    style={{
+                                      fontSize: '0.68rem',
+                                      padding: '0.12rem 0.45rem',
+                                      background: '#ffffff',
+                                      color: '#047857',
+                                      border: '1px solid #10b981',
+                                      borderRadius: '4px',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '3px',
+                                      fontWeight: 700,
+                                      cursor: 'pointer',
+                                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                    title="Click to unlock and edit this customer self-order"
+                                  >
+                                    <Edit size={10} />
+                                    <span>Edit Order</span>
+                                  </button>
+                                )}
+                              </div>
                             )}
-                          </div>
-                        )}
-                        {row.customerOwner && (
-                          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.1, marginTop: '0.15rem' }}>
-                            {row.customerOwner}
-                          </div>
+                            {row.customerOwner && (
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.1, marginTop: '0.15rem' }}>
+                                {row.customerOwner}
+                              </div>
+                            )}
+                          </>
                         )}
                       </td>
 
@@ -2312,25 +2514,16 @@ export const CreateOrderPage: React.FC = () => {
                           className="form-input"
                           value={row.kubbusQty}
                           readOnly={
-                            !dayStatus?.is_opened ||
                             (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                             (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                           }
                           onClick={() => {
-                            if (!dayStatus?.is_opened) {
-                              setIsOpenDayModalOpen(true);
-                              return;
-                            }
                             if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
                               setSelfOrderModalRow(row);
                               setSelfOrderPendingField('kubbus');
                             }
                           }}
                           onFocus={() => {
-                            if (!dayStatus?.is_opened) {
-                              setIsOpenDayModalOpen(true);
-                              return;
-                            }
                             if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
                               setSelfOrderModalRow(row);
                               setSelfOrderPendingField('kubbus');
@@ -2349,21 +2542,17 @@ export const CreateOrderPage: React.FC = () => {
                             fontSize: '0.88rem',
                             display: 'inline-block',
                             cursor: (
-                              !dayStatus?.is_opened ||
                               (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                               (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                             ) ? 'pointer' : 'text',
                             borderColor: row.kubbusQty ? '#f59e0b' : undefined,
                             backgroundColor: (
-                              !dayStatus?.is_opened ||
                               (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                               (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                             ) ? '#f9fafb' : row.kubbusQty ? '#fffbeb' : undefined,
                           }}
                           title={
-                            !dayStatus?.is_opened
-                              ? 'Business Day is not opened. Click to open day first.'
-                              : (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                               ? 'Customer Self-Order. Click to unlock and edit.'
                               : row.status === 'LOCKED'
                               ? 'Order is locked and cannot be edited. Use Reopen to modify.'
@@ -2385,25 +2574,16 @@ export const CreateOrderPage: React.FC = () => {
                           className="form-input"
                           value={row.romaliQty}
                           readOnly={
-                            !dayStatus?.is_opened ||
                             (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                             (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                           }
                           onClick={() => {
-                            if (!dayStatus?.is_opened) {
-                              setIsOpenDayModalOpen(true);
-                              return;
-                            }
                             if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
                               setSelfOrderModalRow(row);
                               setSelfOrderPendingField('romali');
                             }
                           }}
                           onFocus={() => {
-                            if (!dayStatus?.is_opened) {
-                              setIsOpenDayModalOpen(true);
-                              return;
-                            }
                             if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
                               setSelfOrderModalRow(row);
                               setSelfOrderPendingField('romali');
@@ -2422,21 +2602,17 @@ export const CreateOrderPage: React.FC = () => {
                             fontSize: '0.88rem',
                             display: 'inline-block',
                             cursor: (
-                              !dayStatus?.is_opened ||
                               (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                               (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                             ) ? 'pointer' : 'text',
                             borderColor: row.romaliQty ? '#f97316' : undefined,
                             backgroundColor: (
-                              !dayStatus?.is_opened ||
                               (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                               (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                             ) ? '#f9fafb' : row.romaliQty ? '#fff7ed' : undefined,
                           }}
                           title={
-                            !dayStatus?.is_opened
-                              ? 'Business Day is not opened. Click to open day first.'
-                              : (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
                               ? 'Customer Self-Order. Click to unlock and edit.'
                               : row.status === 'LOCKED'
                               ? 'Order is locked and cannot be edited. Use Reopen to modify.'
@@ -2457,15 +2633,8 @@ export const CreateOrderPage: React.FC = () => {
                           placeholder="0.00"
                           className="form-input"
                           value={row.cashAmount}
-                          readOnly={!dayStatus?.is_opened}
-                          onClick={() => {
-                            if (!dayStatus?.is_opened) setIsOpenDayModalOpen(true);
-                          }}
                           onFocus={() => {
-                            if (!dayStatus?.is_opened) {
-                              setIsOpenDayModalOpen(true);
-                              return;
-                            }
+                            if (row.customerId) fetchCustomerPricing(row.customerId);
                           }}
                           onChange={(e) => handleCellChange(row.rowId, 'cashAmount', e.target.value)}
                           onKeyDown={(e) => handleKeyDown(e, index, 'cash')}
@@ -2477,11 +2646,8 @@ export const CreateOrderPage: React.FC = () => {
                             padding: '0.2rem 0.4rem',
                             fontSize: '0.86rem',
                             display: 'inline-block',
-                            cursor: !dayStatus?.is_opened ? 'pointer' : 'text',
                             borderColor: row.cashAmount ? '#10b981' : undefined,
-                            backgroundColor: !dayStatus?.is_opened ? '#f9fafb' : undefined,
                           }}
-                          title={!dayStatus?.is_opened ? 'Business Day is not opened. Click to open day first.' : undefined}
                         />
                       </td>
 
@@ -2497,15 +2663,8 @@ export const CreateOrderPage: React.FC = () => {
                           placeholder="0.00"
                           className="form-input"
                           value={row.gpayAmount}
-                          readOnly={!dayStatus?.is_opened}
-                          onClick={() => {
-                            if (!dayStatus?.is_opened) setIsOpenDayModalOpen(true);
-                          }}
                           onFocus={() => {
-                            if (!dayStatus?.is_opened) {
-                              setIsOpenDayModalOpen(true);
-                              return;
-                            }
+                            if (row.customerId) fetchCustomerPricing(row.customerId);
                           }}
                           onChange={(e) => handleCellChange(row.rowId, 'gpayAmount', e.target.value)}
                           onKeyDown={(e) => handleKeyDown(e, index, 'gpay')}
@@ -2517,11 +2676,8 @@ export const CreateOrderPage: React.FC = () => {
                             padding: '0.2rem 0.4rem',
                             fontSize: '0.86rem',
                             display: 'inline-block',
-                            cursor: !dayStatus?.is_opened ? 'pointer' : 'text',
                             borderColor: row.gpayAmount ? '#dc2626' : undefined,
-                            backgroundColor: !dayStatus?.is_opened ? '#f9fafb' : undefined,
                           }}
-                          title={!dayStatus?.is_opened ? 'Business Day is not opened. Click to open day first.' : undefined}
                         />
                       </td>
 
@@ -2632,35 +2788,63 @@ export const CreateOrderPage: React.FC = () => {
                         )}
                       </td>
 
-                      {/* Action: Remove Row Button */}
-                      <td style={{ textAlign: 'center', padding: '0.35rem 0.25rem' }}>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveRow(row.rowId)}
-                          title={`Remove ${row.customerName || 'row'} from list`}
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            cursor: 'pointer',
-                            padding: '4px',
-                            borderRadius: '4px',
-                            color: 'var(--text-muted)',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            transition: 'all 0.15s ease',
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.color = '#dc2626';
-                            e.currentTarget.style.backgroundColor = 'var(--danger-bg)';
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.color = 'var(--text-muted)';
-                            e.currentTarget.style.backgroundColor = 'transparent';
-                          }}
-                        >
-                          <Trash2 size={15} />
-                        </button>
+                      {/* Action: Save Single Row & Remove Row Buttons */}
+                      <td style={{ textAlign: 'center', padding: '0.35rem 0.25rem', whiteSpace: 'nowrap' }}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSaveSingleRow(row.rowId);
+                            }}
+                            title={`Save order for ${row.customerName || 'shop'} to database`}
+                            disabled={row.status === 'SAVING'}
+                            style={{
+                              background: row.status === 'SAVED' ? '#dcfce7' : isRowActive ? '#ecfdf5' : 'none',
+                              border: row.status === 'SAVED' ? '1px solid #86efac' : isRowActive ? '1px solid #10b981' : 'none',
+                              cursor: 'pointer',
+                              padding: '4px 6px',
+                              borderRadius: '4px',
+                              color: row.status === 'SAVED' ? '#15803d' : isRowActive ? '#059669' : 'var(--text-muted)',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              transition: 'all 0.15s ease',
+                            }}
+                          >
+                            <Save size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveRow(row.rowId);
+                            }}
+                            title={`Remove ${row.customerName || 'row'} from list`}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              padding: '4px',
+                              borderRadius: '4px',
+                              color: 'var(--text-muted)',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              transition: 'all 0.15s ease',
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.color = '#dc2626';
+                              e.currentTarget.style.backgroundColor = 'var(--danger-bg)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.color = 'var(--text-muted)';
+                              e.currentTarget.style.backgroundColor = 'transparent';
+                            }}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
