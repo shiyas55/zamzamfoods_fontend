@@ -159,13 +159,15 @@ export const LoginPage: React.FC = () => {
 
         .animated-input-group {
           margin-bottom: 1.25rem;
+          text-align: left;
         }
         .animated-input-group label {
           display: block;
-          font-size: 0.84rem;
+          font-size: 0.85rem;
           font-weight: 600;
           color: #334155;
-          margin-bottom: 0.45rem;
+          margin-bottom: 0.5rem;
+          letter-spacing: -0.01em;
         }
 
         .input-wrapper {
@@ -173,6 +175,7 @@ export const LoginPage: React.FC = () => {
           display: flex;
           align-items: center;
           width: 100%;
+          box-sizing: border-box;
         }
 
         .input-icon-left {
@@ -181,18 +184,23 @@ export const LoginPage: React.FC = () => {
           top: 50%;
           transform: translateY(-50%);
           color: #94a3b8;
-          transition: all 0.2s ease;
+          transition: color 0.2s ease, transform 0.2s ease;
           pointer-events: none;
           display: flex;
           align-items: center;
           justify-content: center;
-          z-index: 2;
+          width: 20px;
+          height: 20px;
+          z-index: 3;
+          margin: 0;
+          padding: 0;
+          line-height: 0;
         }
 
         .animated-input {
           width: 100%;
           height: 48px;
-          padding: 0 1rem 0 2.85rem;
+          padding: 0 2.85rem 0 2.85rem;
           border: 1.5px solid #e2e8f0;
           border-radius: 12px;
           font-size: 0.95rem;
@@ -201,6 +209,7 @@ export const LoginPage: React.FC = () => {
           transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
           outline: none;
           box-sizing: border-box;
+          line-height: 48px;
         }
         .animated-input::placeholder {
           color: #94a3b8;
@@ -213,28 +222,34 @@ export const LoginPage: React.FC = () => {
         }
         .input-wrapper:focus-within .input-icon-left {
           color: #dc2626;
-          transform: translateY(-50%) scale(1.08);
+          transform: translateY(-50%) scale(1.05);
         }
 
         .password-toggle-btn {
           position: absolute;
-          right: 0.85rem;
+          right: 0.65rem;
           top: 50%;
           transform: translateY(-50%);
-          background: none;
+          background: transparent;
           border: none;
           color: #94a3b8;
           cursor: pointer;
-          padding: 4px;
+          width: 34px;
+          height: 34px;
           display: flex;
           align-items: center;
           justify-content: center;
-          border-radius: 6px;
-          transition: color 0.15s ease;
-          z-index: 2;
+          border-radius: 8px;
+          transition: all 0.15s ease;
+          z-index: 3;
+          padding: 0;
         }
         .password-toggle-btn:hover {
-          color: #475569;
+          color: #dc2626;
+          background: rgba(220, 38, 38, 0.08);
+        }
+        .password-toggle-btn:active {
+          transform: translateY(-50%) scale(0.95);
         }
 
         .animated-submit-btn {
