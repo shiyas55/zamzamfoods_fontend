@@ -7,10 +7,10 @@
  *
  * Token refresh flow:
  *   1. Request returns 401
- *   2. Client calls POST /auth/refresh/ with refresh token and credentials
+ *   2. Single-flight Promise mutex calls POST /auth/refresh/ with refresh token and credentials
  *   3. Server issues new access + refresh tokens
  *   4. Client updates stored tokens and retries original request
- *   5. If refresh fails → dispatch auth:logout → frontend redirects to /login
+ *   5. If refresh fails with 401 → dispatch auth:logout → frontend redirects to /login
  */
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
@@ -22,22 +22,11 @@ interface RequestOptions extends RequestInit {
 }
 
 class ApiClient {
-  private isRefreshing = false;
-  private refreshSubscribers: Array<() => void> = [];
-
-  /** Notify all queued requests that a fresh token has been set. */
-  private onTokenRefreshed() {
-    this.refreshSubscribers.forEach((cb) => cb());
-    this.refreshSubscribers = [];
-  }
-
-  /** Queue a retry callback to be called after refresh completes. */
-  private addRefreshSubscriber(cb: () => void) {
-    this.refreshSubscribers.push(cb);
-  }
+  private refreshPromise: Promise<boolean> | null = null;
 
   /**
    * Silently obtain a new access token by calling the refresh endpoint.
+   * Utilizes a single-flight mutex to prevent concurrent refresh race conditions.
    */
   private async refreshAccessToken(): Promise<boolean> {
     const refreshToken = localStorage.getItem('zamzam_refresh_token');
@@ -46,35 +35,46 @@ class ApiClient {
       return false;
     }
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: refreshToken ? JSON.stringify({ refresh: refreshToken }) : undefined,
-      });
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
 
-      if (!response.ok) {
-        // Prevent race condition: only clear if the token hasn't changed (e.g. from a fresh login)
-        if (localStorage.getItem('zamzam_refresh_token') === refreshToken) {
-          this.clearTokens();
-          this.dispatchLogout();
+    this.refreshPromise = (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: refreshToken ? JSON.stringify({ refresh: refreshToken }) : undefined,
+        });
+
+        if (!response.ok) {
+          // If server explicitly rejects the refresh token with 401 or 400
+          if (response.status === 401 || response.status === 400) {
+            const currentRt = localStorage.getItem('zamzam_refresh_token');
+            if (currentRt === refreshToken) {
+              this.clearTokens();
+              this.dispatchLogout();
+            }
+          }
+          return false;
+        }
+
+        const data = await response.json().catch(() => ({}));
+        if (data.access) {
+          this.setTokens(data.access, data.refresh || refreshToken || '');
+          return true;
         }
         return false;
+      } catch {
+        // Network error during refresh: do not force logout, return false
+        return false;
+      } finally {
+        this.refreshPromise = null;
       }
+    })();
 
-      const data = await response.json().catch(() => ({}));
-      if (data.access) {
-        this.setTokens(data.access, data.refresh || refreshToken || '');
-      }
-      return true;
-    } catch {
-      if (localStorage.getItem('zamzam_refresh_token') === refreshToken) {
-        this.clearTokens();
-        this.dispatchLogout();
-      }
-      return false;
-    }
+    return this.refreshPromise;
   }
 
   private dispatchLogout() {
@@ -118,7 +118,7 @@ class ApiClient {
         headers,
         credentials: 'include',
       });
-    } catch (err: unknown) {
+    } catch {
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         throw new Error(
           'You are currently offline. Live operations require a connection to the Zamzam server.'
@@ -127,38 +127,17 @@ class ApiClient {
       throw new Error('Unable to connect to the Zamzam server. Please check your connection and try again.');
     }
 
-    // ── 401 handler: attempt token refresh then retry ──────────────────────
+    // ── 401 handler: attempt single-flight token refresh then retry ──────────────────────
     if (
       response.status === 401 &&
       !_skipRefresh &&
       !endpoint.includes('/auth/login') &&
       !endpoint.includes('/auth/refresh')
     ) {
-      if (!this.isRefreshing) {
-        this.isRefreshing = true;
-        const refreshed = await this.refreshAccessToken();
-        this.isRefreshing = false;
+      const refreshed = await this.refreshAccessToken();
 
-        if (refreshed) {
-          this.onTokenRefreshed();
-          // Update authorization header with newly refreshed access token
-          const freshToken = localStorage.getItem('zamzam_access_token');
-          if (freshToken) {
-            headers['Authorization'] = `Bearer ${freshToken}`;
-          }
-          response = await fetch(url, {
-            ...fetchOptions,
-            headers,
-            credentials: 'include',
-          });
-        } else {
-          throw new Error('Session expired. Please log in again.');
-        }
-      } else {
-        // Another refresh is in progress — wait for it, then retry
-        await new Promise<void>((resolve) => {
-          this.addRefreshSubscriber(resolve);
-        });
+      if (refreshed) {
+        // Update authorization header with newly refreshed access token
         const freshToken = localStorage.getItem('zamzam_access_token');
         if (freshToken) {
           headers['Authorization'] = `Bearer ${freshToken}`;
@@ -168,6 +147,8 @@ class ApiClient {
           headers,
           credentials: 'include',
         });
+      } else {
+        throw new Error('Session expired. Please log in again.');
       }
     }
 
