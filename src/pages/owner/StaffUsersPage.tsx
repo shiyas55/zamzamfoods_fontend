@@ -99,13 +99,29 @@ export const StaffUsersPage: React.FC = () => {
     }
   };
 
-  const handleDeleteUser = async (user: User) => {
-    if (!window.confirm(`Are you sure you want to delete ${user.username}?`)) return;
+  // Delete Modal State
+  const [deletingUser, setDeletingUser] = useState<User | null>(null);
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDeleteUser = (user: User) => {
+    setDeletingUser(user);
+    setDeleteError(null);
+  };
+
+  const handleConfirmDeleteUser = async () => {
+    if (!deletingUser) return;
     try {
-      await authService.deleteUser(user.id);
+      setIsDeletingUser(true);
+      setDeleteError(null);
+      await authService.deleteUser(deletingUser.id);
+      setDeletingUser(null);
       fetchUsers();
-    } catch (err) {
-      alert('Failed to delete user.');
+    } catch (err: unknown) {
+      if (err instanceof Error) setDeleteError(err.message);
+      else setDeleteError('Failed to delete user.');
+    } finally {
+      setIsDeletingUser(false);
     }
   };
 
@@ -485,6 +501,56 @@ export const StaffUsersPage: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete User Confirmation Modal */}
+      {deletingUser && (
+        <div className="modal-overlay">
+          <div className="modal-content" style={{ maxWidth: '440px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem', color: '#dc2626' }}>
+              <div style={{ width: '38px', height: '38px', borderRadius: '50%', background: '#fee2e2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Trash2 size={20} />
+              </div>
+              <div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0, color: '#0f172a' }}>
+                  Delete Staff Member?
+                </h3>
+                <span style={{ fontSize: '0.82rem', color: '#64748b' }}>Revokes system access immediately.</span>
+              </div>
+            </div>
+
+            {deleteError && (
+              <div style={{ background: 'var(--danger-bg)', color: 'var(--danger)', padding: '0.75rem', borderRadius: 'var(--radius-md)', marginBottom: '1rem', fontSize: '0.85rem' }}>
+                {deleteError}
+              </div>
+            )}
+
+            <p style={{ fontSize: '0.9rem', color: '#334155', lineHeight: 1.5, marginBottom: '1.25rem' }}>
+              Are you sure you want to permanently delete user <strong>@{deletingUser.username}</strong> ({deletingUser.role})?
+            </p>
+
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ flex: 1 }}
+                onClick={() => setDeletingUser(null)}
+                disabled={isDeletingUser}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                style={{ flex: 1, background: '#dc2626', borderColor: '#dc2626', color: 'white', fontWeight: 700 }}
+                onClick={handleConfirmDeleteUser}
+                disabled={isDeletingUser}
+              >
+                {isDeletingUser ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}
