@@ -85,6 +85,11 @@ export const DatabaseStorageBackupSection: React.FC = () => {
 
   useEffect(() => {
     fetchStats();
+    // Live auto-polling every 15s to keep database storage & active records 100% dynamic in real-time
+    const interval = setInterval(() => {
+      fetchStats(true);
+    }, 15000);
+    return () => clearInterval(interval);
   }, [fetchStats]);
 
   const modulesToRender =
