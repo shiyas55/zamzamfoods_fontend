@@ -7,7 +7,7 @@ import { BRAND_CONFIG } from '../config/brandConfig';
 import {
   LayoutDashboard, PlusCircle, ShoppingCart, Store, Send, CreditCard,
   BookOpen, LogOut, Receipt, Sun, Moon, Activity, History, Truck, Lock,
-  BarChart3, ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen, Menu, X, MessageCircle,
+  BarChart3, ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen, Menu, X, MessageCircle, Settings,
 } from 'lucide-react';
 import { ZentrixSidebarCard, ZentrixHelpDeskWidget } from '../components/ZentrixHelpDesk';
 
@@ -66,6 +66,7 @@ export const ManagerLayout: React.FC = () => {
     { to: '/manager/driver-performance', label: 'Driver Performance',     icon: Activity        },
     { to: '/manager/daily-closing',      label: 'Daily Closing',          icon: Lock            },
     { to: '/manager/credit',             label: 'Credit Ledger',          icon: BookOpen        },
+    { to: '/manager/settings',           label: 'Settings & Cache',       icon: Settings        },
   ];
 
   const sidebarWidth = isCollapsed ? '72px' : '260px';

@@ -121,6 +121,7 @@ export const AppRoutes: React.FC = () => {
         <Route path="credit" element={<CreditLedgerPage />} />
         <Route path="drivers" element={<DriversPage />} />
         <Route path="daily-closing" element={<DailyClosingPage />} />
+        <Route path="settings" element={<SettingsPage />} />
       </Route>
 
 

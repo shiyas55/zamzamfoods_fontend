@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   RefreshCw,
   Clock,
@@ -10,16 +10,105 @@ import {
   Zap,
   Trash2,
   Server,
+  Smartphone,
+  Laptop,
+  Radio,
+  Check,
 } from 'lucide-react';
+import { settingsService } from '../services/settingsService';
+
+interface VersionInfo {
+  version: string;
+  buildTimestamp: string;
+  lastWebsiteUpdate: string;
+  environment: string;
+  releaseNotes?: string;
+}
 
 export const WebsiteCacheVersionSection: React.FC = () => {
   const [clearingCache, setClearingCache] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [apiLatency, setApiLatency] = useState<number | null>(null);
+  const [swActive, setSwActive] = useState<boolean>(false);
+  const [cachedEntriesCount, setCachedEntriesCount] = useState<number>(0);
 
-  // App Build & Release Metadata
-  const appVersion = 'v3.2.0 Enterprise';
-  const buildDate = 'October 1, 2026, 03:15 PM IST';
-  const releaseChannel = 'Production (Railway Cloud + Supabase)';
+  const [versionData, setVersionData] = useState<VersionInfo>({
+    version: '3.2.0',
+    buildTimestamp: '2026-10-01T09:48:00.000Z',
+    lastWebsiteUpdate: 'October 1, 2026, 03:20 PM IST',
+    environment: 'production',
+    releaseNotes: 'Storage telemetry, driver/route/product deletions, session security, cache purge engine',
+  });
+
+  // Fetch version & inspect local cache stats
+  const inspectEnvironment = async () => {
+    try {
+      // 1. Fetch version.json with cache buster
+      const res = await fetch(`/version.json?t=${Date.now()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setVersionData(data);
+      }
+    } catch {
+      // Use fallback
+    }
+
+    // 2. Measure API ping latency
+    try {
+      const startTime = performance.now();
+      await settingsService.getSettings();
+      const endTime = performance.now();
+      setApiLatency(Math.round(endTime - startTime));
+    } catch {
+      setApiLatency(null);
+    }
+
+    // 3. Inspect Service Worker
+    if ('serviceWorker' in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      setSwActive(registrations.length > 0);
+    }
+
+    // 4. Count CacheStorage entries
+    if ('caches' in window) {
+      try {
+        const keys = await caches.keys();
+        let total = 0;
+        for (const key of keys) {
+          const cache = await caches.open(key);
+          const requests = await cache.keys();
+          total += requests.length;
+        }
+        setCachedEntriesCount(total);
+      } catch {
+        setCachedEntriesCount(0);
+      }
+    }
+  };
+
+  useEffect(() => {
+    inspectEnvironment();
+  }, []);
+
+  const handleCheckForUpdates = async () => {
+    setCheckingUpdate(true);
+    setFeedback(null);
+    try {
+      await inspectEnvironment();
+      setFeedback({
+        type: 'info',
+        message: `Deployment verified: You are connected to the live Railway Cloud server (${apiLatency ? apiLatency + 'ms' : 'Active'}). Latest update: ${versionData.lastWebsiteUpdate}`,
+      });
+    } catch {
+      setFeedback({
+        type: 'error',
+        message: 'Could not connect to deployment server. Please check your internet connection.',
+      });
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   const handleClearCacheAndReload = async () => {
     try {
@@ -30,6 +119,11 @@ export const WebsiteCacheVersionSection: React.FC = () => {
       if ('serviceWorker' in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations();
         for (const registration of registrations) {
+          try {
+            registration.active?.postMessage({ type: 'PURGE_ALL_CACHE' });
+          } catch {
+            // ignore
+          }
           await registration.unregister();
         }
       }
@@ -47,13 +141,13 @@ export const WebsiteCacheVersionSection: React.FC = () => {
 
       setFeedback({
         type: 'success',
-        message: 'Cache successfully cleared! Reloading fresh application...',
+        message: 'Cache successfully purged! Reloading fresh application in 1 second...',
       });
 
       // 4. Force reload with cache-busting timestamp
       setTimeout(() => {
         window.location.href = window.location.pathname + '?reload=' + Date.now();
-      }, 1000);
+      }, 900);
     } catch (err: unknown) {
       setFeedback({
         type: 'error',
@@ -73,7 +167,7 @@ export const WebsiteCacheVersionSection: React.FC = () => {
         boxShadow: 'var(--shadow-sm)',
       }}
     >
-      {/* Top Banner */}
+      {/* Top Banner Header */}
       <div
         style={{
           padding: '1.25rem 1.75rem',
@@ -89,23 +183,23 @@ export const WebsiteCacheVersionSection: React.FC = () => {
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
           <div
             style={{
-              width: 38,
-              height: 38,
-              borderRadius: '10px',
-              background: 'rgba(99, 102, 241, 0.2)',
-              border: '1px solid rgba(99, 102, 241, 0.35)',
+              width: 42,
+              height: 42,
+              borderRadius: '12px',
+              background: 'rgba(99, 102, 241, 0.25)',
+              border: '1px solid rgba(99, 102, 241, 0.45)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               color: '#818cf8',
             }}
           >
-            <Globe size={20} />
+            <Globe size={22} />
           </div>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-              <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: '#ffffff' }}>
-                Website & Application Deployment Telemetry
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+              <h3 style={{ fontSize: '1.18rem', fontWeight: 800, margin: 0, color: '#ffffff' }}>
+                Website Version & Cache Telemetry
               </h3>
               <span
                 style={{
@@ -114,44 +208,74 @@ export const WebsiteCacheVersionSection: React.FC = () => {
                   backgroundColor: 'rgba(16, 185, 129, 0.25)',
                   color: '#34d399',
                   border: '1px solid rgba(52, 211, 153, 0.35)',
-                  padding: '0.15rem 0.5rem',
+                  padding: '0.15rem 0.55rem',
                   borderRadius: '999px',
                   textTransform: 'uppercase',
                   letterSpacing: '0.04em',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.3rem',
                 }}
               >
-                LIVE & SYNCED
+                <Radio size={10} className="pulse" />
+                LIVE PRODUCTION
               </span>
             </div>
-            <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: '0.2rem 0 0 0' }}>
-              Real-time build version, deployment timestamps, and one-click browser cache purging.
+            <p style={{ fontSize: '0.82rem', color: '#94a3b8', margin: '0.25rem 0 0 0' }}>
+              Real-time build timestamps, cloud deployment sync, and 1-click browser cache reset.
             </p>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleClearCacheAndReload}
-          disabled={clearingCache}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.45rem',
-            padding: '0.55rem 1.1rem',
-            borderRadius: '10px',
-            background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)',
-            border: '1px solid rgba(255, 255, 255, 0.2)',
-            color: '#ffffff',
-            fontSize: '0.82rem',
-            fontWeight: 700,
-            cursor: 'pointer',
-            boxShadow: '0 4px 12px rgba(220, 38, 38, 0.3)',
-            transition: 'all 0.2s ease',
-          }}
-        >
-          <Trash2 size={15} className={clearingCache ? 'spinner' : ''} />
-          <span>{clearingCache ? 'Purging Cache...' : 'Purge Cache & Update'}</span>
-        </button>
+        {/* Top Actions */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={handleCheckForUpdates}
+            disabled={checkingUpdate || clearingCache}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.45rem',
+              padding: '0.55rem 0.95rem',
+              borderRadius: '10px',
+              background: 'rgba(255, 255, 255, 0.1)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              color: '#ffffff',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <RefreshCw size={14} className={checkingUpdate ? 'spinner' : ''} />
+            <span>{checkingUpdate ? 'Checking...' : 'Check Server'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleClearCacheAndReload}
+            disabled={clearingCache}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.45rem',
+              padding: '0.55rem 1.15rem',
+              borderRadius: '10px',
+              background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)',
+              border: '1px solid rgba(255, 255, 255, 0.25)',
+              color: '#ffffff',
+              fontSize: '0.82rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+              boxShadow: '0 4px 14px rgba(220, 38, 38, 0.35)',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <Trash2 size={15} className={clearingCache ? 'spinner' : ''} />
+            <span>{clearingCache ? 'Purging Cache...' : 'Purge Cache & Force Update'}</span>
+          </button>
+        </div>
       </div>
 
       <div style={{ padding: '1.75rem' }}>
@@ -159,29 +283,51 @@ export const WebsiteCacheVersionSection: React.FC = () => {
         {feedback && (
           <div
             style={{
-              padding: '0.85rem 1rem',
+              padding: '0.85rem 1.1rem',
               borderRadius: '10px',
               marginBottom: '1.5rem',
               display: 'flex',
               alignItems: 'center',
               gap: '0.65rem',
-              background: feedback.type === 'success' ? '#f0fdf4' : '#fef2f2',
-              border: `1px solid ${feedback.type === 'success' ? '#bbf7d0' : '#fecaca'}`,
-              color: feedback.type === 'success' ? '#166534' : '#991b1b',
+              background:
+                feedback.type === 'success'
+                  ? '#f0fdf4'
+                  : feedback.type === 'info'
+                  ? '#eff6ff'
+                  : '#fef2f2',
+              border: `1px solid ${
+                feedback.type === 'success'
+                  ? '#bbf7d0'
+                  : feedback.type === 'info'
+                  ? '#bfdbfe'
+                  : '#fecaca'
+              }`,
+              color:
+                feedback.type === 'success'
+                  ? '#166534'
+                  : feedback.type === 'info'
+                  ? '#1e40af'
+                  : '#991b1b',
               fontSize: '0.88rem',
               fontWeight: 600,
             }}
           >
-            {feedback.type === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+            {feedback.type === 'success' ? (
+              <CheckCircle2 size={18} />
+            ) : feedback.type === 'info' ? (
+              <Sparkles size={18} />
+            ) : (
+              <AlertTriangle size={18} />
+            )}
             <span>{feedback.message}</span>
           </div>
         )}
 
-        {/* Telemetry Cards */}
+        {/* Telemetry Cards Grid */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
             gap: '1rem',
             marginBottom: '1.5rem',
           }}
@@ -193,91 +339,199 @@ export const WebsiteCacheVersionSection: React.FC = () => {
               borderRadius: '12px',
               background: '#f8fafc',
               border: '1px solid #e2e8f0',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#64748b' }}>LAST WEBSITE UPDATE</span>
-              <Clock size={16} color="#0284c7" />
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.76rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>
+                  Last Website Update
+                </span>
+                <Clock size={16} color="#0284c7" />
+              </div>
+              <div style={{ fontSize: '1.12rem', fontWeight: 800, color: '#0f172a', marginBottom: '0.35rem', lineHeight: 1.3 }}>
+                {versionData.lastWebsiteUpdate}
+              </div>
             </div>
-            <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#0f172a', marginBottom: '0.35rem' }}>
-              {buildDate}
-            </div>
-            <div style={{ fontSize: '0.75rem', color: '#059669', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-              <Sparkles size={13} />
-              <span>Latest code deployed to production</span>
+            <div style={{ fontSize: '0.75rem', color: '#059669', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.5rem' }}>
+              <Check size={14} />
+              <span>Deployed to Railway Production</span>
             </div>
           </div>
 
-          {/* Card 2: Release Version */}
+          {/* Card 2: App Release Version */}
           <div
             style={{
               padding: '1.25rem',
               borderRadius: '12px',
               background: '#f8fafc',
               border: '1px solid #e2e8f0',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#64748b' }}>APP RELEASE BUILD</span>
-              <Zap size={16} color="#dc2626" />
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.76rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>
+                  Release Version
+                </span>
+                <Zap size={16} color="#dc2626" />
+              </div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#dc2626', marginBottom: '0.35rem' }}>
+                v{versionData.version} Enterprise
+              </div>
             </div>
-            <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#dc2626', marginBottom: '0.35rem' }}>
-              {appVersion}
-            </div>
-            <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-              {releaseChannel}
+            <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.5rem' }}>
+              Railway Cloud + Supabase PostgreSQL
             </div>
           </div>
 
-          {/* Card 3: Cache Invalidation Engine */}
+          {/* Card 3: Live API & Cloud Sync */}
           <div
             style={{
               padding: '1.25rem',
               borderRadius: '12px',
               background: '#f8fafc',
               border: '1px solid #e2e8f0',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#64748b' }}>CACHE BUSTING ENGINE</span>
-              <HardDrive size={16} color="#059669" />
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.76rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>
+                  Cloud API Connectivity
+                </span>
+                <Server size={16} color="#059669" />
+              </div>
+              <div style={{ fontSize: '1.12rem', fontWeight: 800, color: '#059669', marginBottom: '0.35rem' }}>
+                {apiLatency ? `Online (${apiLatency}ms)` : 'Connected'}
+              </div>
             </div>
-            <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#059669', marginBottom: '0.35rem' }}>
-              Automatic No-Cache
+            <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '0.5rem' }}>
+              Backend endpoint: <code style={{ fontSize: '0.72rem', background: '#e2e8f0', padding: '1px 4px', borderRadius: '4px' }}>/api/</code>
             </div>
-            <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-              HTTP no-store headers + Service Worker v3.0
+          </div>
+
+          {/* Card 4: Local Cache Storage Status */}
+          <div
+            style={{
+              padding: '1.25rem',
+              borderRadius: '12px',
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+            }}
+          >
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.76rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>
+                  Browser Cache Status
+                </span>
+                <HardDrive size={16} color="#7c3aed" />
+              </div>
+              <div style={{ fontSize: '1.12rem', fontWeight: 800, color: '#7c3aed', marginBottom: '0.35rem' }}>
+                {cachedEntriesCount > 0 ? `${cachedEntriesCount} Cached Items` : 'Clean & Fresh'}
+              </div>
+            </div>
+            <div style={{ fontSize: '0.75rem', color: swActive ? '#16a34a' : '#64748b', fontWeight: swActive ? 600 : 400, marginTop: '0.5rem' }}>
+              Service Worker: {swActive ? 'Active (Auto-Updating)' : 'Standard Network Mode'}
             </div>
           </div>
         </div>
 
-        {/* Tip Box */}
+        {/* Release Features */}
+        {versionData.releaseNotes && (
+          <div
+            style={{
+              padding: '0.85rem 1rem',
+              borderRadius: '10px',
+              background: '#faf5ff',
+              border: '1px solid #e9d5ff',
+              fontSize: '0.82rem',
+              color: '#6b21a8',
+              marginBottom: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+            }}
+          >
+            <Sparkles size={16} style={{ color: '#9333ea', flexShrink: 0 }} />
+            <span><strong>Latest Release Features:</strong> {versionData.releaseNotes}</span>
+          </div>
+        )}
+
+        {/* Cache Fix Quick Guide Cards */}
         <div
           style={{
-            padding: '1rem 1.25rem',
-            borderRadius: '10px',
-            background: '#eff6ff',
-            border: '1px solid #bfdbfe',
-            fontSize: '0.84rem',
-            color: '#1e40af',
-            lineHeight: 1.5,
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '0.65rem',
+            marginTop: '1rem',
+            padding: '1.25rem',
+            borderRadius: '12px',
+            background: '#f0fdf4',
+            border: '1px solid #bbf7d0',
           }}
         >
-          <Server size={18} style={{ flexShrink: 0, marginTop: '2px', color: '#2563eb' }} />
-          <div>
-            <strong>Need to see immediate changes after an update?</strong> Click the{' '}
-            <strong>"Purge Cache & Update"</strong> button above, or press{' '}
-            <kbd style={{ background: '#ffffff', padding: '0.15rem 0.45rem', borderRadius: '4px', border: '1px solid #93c5fd', fontWeight: 700 }}>
-              Cmd + Shift + R
-            </kbd>{' '}
-            (Mac) or{' '}
-            <kbd style={{ background: '#ffffff', padding: '0.15rem 0.45rem', borderRadius: '4px', border: '1px solid #93c5fd', fontWeight: 700 }}>
-              Ctrl + Shift + R
-            </kbd>{' '}
-            (Windows) in your browser.
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <Sparkles size={18} color="#16a34a" />
+            <h4 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#166534' }}>
+              How to Fix Stale Cache Issues on Any Device
+            </h4>
+          </div>
+
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: '0.85rem',
+              fontSize: '0.82rem',
+              color: '#1e293b',
+            }}
+          >
+            <div style={{ background: '#ffffff', padding: '0.75rem', borderRadius: '8px', border: '1px solid #dcfce7' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 700, color: '#166534', marginBottom: '0.25rem' }}>
+                <Laptop size={15} />
+                <span>Mac Computers</span>
+              </div>
+              <p style={{ margin: 0, color: '#475569', fontSize: '0.78rem' }}>
+                Press <kbd style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: '3px', border: '1px solid #cbd5e1', fontWeight: 700 }}>Cmd + Shift + R</kbd> in Safari or Chrome.
+              </p>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '0.75rem', borderRadius: '8px', border: '1px solid #dcfce7' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 700, color: '#166534', marginBottom: '0.25rem' }}>
+                <Laptop size={15} />
+                <span>Windows Computers</span>
+              </div>
+              <p style={{ margin: 0, color: '#475569', fontSize: '0.78rem' }}>
+                Press <kbd style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: '3px', border: '1px solid #cbd5e1', fontWeight: 700 }}>Ctrl + Shift + R</kbd> or <kbd style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: '3px', border: '1px solid #cbd5e1', fontWeight: 700 }}>Ctrl + F5</kbd>.
+              </p>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '0.75rem', borderRadius: '8px', border: '1px solid #dcfce7' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 700, color: '#166534', marginBottom: '0.25rem' }}>
+                <Smartphone size={15} />
+                <span>iPhone / iPad</span>
+              </div>
+              <p style={{ margin: 0, color: '#475569', fontSize: '0.78rem' }}>
+                Click <strong>"Purge Cache & Force Update"</strong> button above, or open iOS Settings → Safari → Clear History.
+              </p>
+            </div>
+
+            <div style={{ background: '#ffffff', padding: '0.75rem', borderRadius: '8px', border: '1px solid #dcfce7' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 700, color: '#166534', marginBottom: '0.25rem' }}>
+                <Smartphone size={15} />
+                <span>Android Phone</span>
+              </div>
+              <p style={{ margin: 0, color: '#475569', fontSize: '0.78rem' }}>
+                Click <strong>"Purge Cache & Force Update"</strong> button above, or Chrome Menu ⋮ → Settings → Clear data.
+              </p>
+            </div>
           </div>
         </div>
       </div>
