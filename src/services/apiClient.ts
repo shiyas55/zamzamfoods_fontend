@@ -40,8 +40,13 @@ class ApiClient {
    * Silently obtain a new access token by calling the refresh endpoint.
    */
   private async refreshAccessToken(): Promise<boolean> {
+    const refreshToken = localStorage.getItem('zamzam_refresh_token');
+    // If there is no refresh token and no user, we are simply unauthenticated
+    if (!refreshToken && !localStorage.getItem('zamzam_user')) {
+      return false;
+    }
+
     try {
-      const refreshToken = localStorage.getItem('zamzam_refresh_token');
       const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
         method: 'POST',
         credentials: 'include',
@@ -50,8 +55,11 @@ class ApiClient {
       });
 
       if (!response.ok) {
-        this.clearTokens();
-        this.dispatchLogout();
+        // Prevent race condition: only clear if the token hasn't changed (e.g. from a fresh login)
+        if (localStorage.getItem('zamzam_refresh_token') === refreshToken) {
+          this.clearTokens();
+          this.dispatchLogout();
+        }
         return false;
       }
 
@@ -61,8 +69,10 @@ class ApiClient {
       }
       return true;
     } catch {
-      this.clearTokens();
-      this.dispatchLogout();
+      if (localStorage.getItem('zamzam_refresh_token') === refreshToken) {
+        this.clearTokens();
+        this.dispatchLogout();
+      }
       return false;
     }
   }
