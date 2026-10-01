@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { authService } from '../../services/authService';
+import { useAuth } from '../../context/AuthContext';
 import { User } from '../../types';
 import { Users, Plus, X, Shield, Edit2, Trash2, Key } from 'lucide-react';
 
 export const StaffUsersPage: React.FC = () => {
+  const { user: currentUser } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -164,7 +166,7 @@ export const StaffUsersPage: React.FC = () => {
             Staff & System Access
           </h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-            Role-based user management for Owners, Managers, and Route Drivers.
+            Role-based user management for Owners, Managers, and Route Drivers. Owners have full managerial & operational access.
           </p>
         </div>
         <button className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
@@ -303,9 +305,9 @@ export const StaffUsersPage: React.FC = () => {
               <div className="form-group">
                 <label className="form-label">System Role *</label>
                 <select className="form-select" value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="DRIVER">Driver (Mobile delivery interface)</option>
-                  <option value="MANAGER">Manager (Daily operations)</option>
-                  <option value="OWNER">Owner (Full administrative access)</option>
+                  <option value="OWNER">Owner (Full administrative + Manager access)</option>
+                  <option value="MANAGER">Manager (Daily order entry & delivery dispatch operations)</option>
+                  <option value="DRIVER">Driver (Mobile delivery interface & stop completion)</option>
                 </select>
               </div>
 
@@ -385,11 +387,21 @@ export const StaffUsersPage: React.FC = () => {
 
               <div className="form-group">
                 <label className="form-label">System Role *</label>
-                <select className="form-select" value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="DRIVER">Driver (Mobile delivery interface)</option>
-                  <option value="MANAGER">Manager (Daily operations)</option>
-                  <option value="OWNER">Owner (Full administrative access)</option>
+                <select
+                  className="form-select"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  disabled={editingUser.id === currentUser?.id && currentUser?.role === 'OWNER'}
+                >
+                  <option value="OWNER">Owner (Full administrative + Manager access)</option>
+                  <option value="MANAGER">Manager (Daily order entry & delivery dispatch operations)</option>
+                  <option value="DRIVER">Driver (Mobile delivery interface & stop completion)</option>
                 </select>
+                {editingUser.id === currentUser?.id && (
+                  <p style={{ margin: '0.35rem 0 0 0', fontSize: '0.75rem', color: '#b45309' }}>
+                    Note: This is your currently logged-in account. Owner role cannot be demoted to prevent lock-out.
+                  </p>
+                )}
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
