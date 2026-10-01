@@ -172,35 +172,31 @@ export const LoginPage: React.FC = () => {
 
         .input-wrapper {
           position: relative;
-          display: flex;
-          align-items: center;
           width: 100%;
           box-sizing: border-box;
         }
 
         .input-icon-left {
           position: absolute;
-          left: 1rem;
-          top: 50%;
-          transform: translateY(-50%);
+          left: 14px;
+          top: 0;
+          bottom: 0;
+          margin: auto 0;
           color: #94a3b8;
-          transition: color 0.2s ease, transform 0.2s ease;
+          transition: color 0.2s ease;
           pointer-events: none;
           display: flex;
           align-items: center;
           justify-content: center;
           width: 20px;
           height: 20px;
-          z-index: 3;
-          margin: 0;
-          padding: 0;
-          line-height: 0;
+          z-index: 5;
         }
 
         .animated-input {
           width: 100%;
           height: 48px;
-          padding: 0 2.85rem 0 2.85rem;
+          padding: 0 44px 0 42px;
           border: 1.5px solid #e2e8f0;
           border-radius: 12px;
           font-size: 0.95rem;
@@ -209,7 +205,7 @@ export const LoginPage: React.FC = () => {
           transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
           outline: none;
           box-sizing: border-box;
-          line-height: 48px;
+          line-height: normal;
         }
         .animated-input::placeholder {
           color: #94a3b8;
@@ -222,14 +218,14 @@ export const LoginPage: React.FC = () => {
         }
         .input-wrapper:focus-within .input-icon-left {
           color: #dc2626;
-          transform: translateY(-50%) scale(1.05);
         }
 
         .password-toggle-btn {
           position: absolute;
-          right: 0.65rem;
-          top: 50%;
-          transform: translateY(-50%);
+          right: 8px;
+          top: 0;
+          bottom: 0;
+          margin: auto 0;
           background: transparent;
           border: none;
           color: #94a3b8;
@@ -241,7 +237,7 @@ export const LoginPage: React.FC = () => {
           justify-content: center;
           border-radius: 8px;
           transition: all 0.15s ease;
-          z-index: 3;
+          z-index: 5;
           padding: 0;
         }
         .password-toggle-btn:hover {
@@ -249,7 +245,7 @@ export const LoginPage: React.FC = () => {
           background: rgba(220, 38, 38, 0.08);
         }
         .password-toggle-btn:active {
-          transform: translateY(-50%) scale(0.95);
+          transform: scale(0.95);
         }
 
         .animated-submit-btn {
