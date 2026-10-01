@@ -714,7 +714,7 @@ export const CreateOrderPage: React.FC = () => {
           d.is_active
       );
 
-      const assignedDriverId = autoConfirmDriver ? routeDriver?.id || null : null;
+      const assignedDriverId = row.driverId || routeDriver?.id || null;
 
       const items: Array<{ product_id: string; quantity: number; unit_price: string }> = [];
       if (fin.kQty > 0 && kubbusProduct) {
@@ -1193,7 +1193,7 @@ export const CreateOrderPage: React.FC = () => {
             d.is_active
         );
 
-        const assignedDriverId = autoConfirmDriver ? routeDriver?.id || null : null;
+        const assignedDriverId = row.driverId || routeDriver?.id || null;
 
         const items: Array<{ product_id: string; quantity: number; unit_price: string }> = [];
         if (fin.kQty > 0 && kubbusProduct) {
