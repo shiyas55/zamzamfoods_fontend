@@ -173,15 +173,17 @@ export const LoginPage: React.FC = () => {
         .input-wrapper {
           position: relative;
           width: 100%;
+          height: 48px;
+          display: flex;
+          align-items: center;
           box-sizing: border-box;
         }
 
         .input-icon-left {
           position: absolute;
           left: 14px;
-          top: 0;
-          bottom: 0;
-          margin: auto 0;
+          top: 50%;
+          transform: translateY(-50%);
           color: #94a3b8;
           transition: color 0.2s ease;
           pointer-events: none;
@@ -195,7 +197,7 @@ export const LoginPage: React.FC = () => {
 
         .animated-input {
           width: 100%;
-          height: 48px;
+          height: 100%;
           padding: 0 44px 0 42px;
           border: 1.5px solid #e2e8f0;
           border-radius: 12px;
@@ -222,16 +224,15 @@ export const LoginPage: React.FC = () => {
 
         .password-toggle-btn {
           position: absolute;
-          right: 8px;
-          top: 0;
-          bottom: 0;
-          margin: auto 0;
+          right: 10px;
+          top: 50%;
+          transform: translateY(-50%);
           background: transparent;
           border: none;
           color: #94a3b8;
           cursor: pointer;
-          width: 34px;
-          height: 34px;
+          width: 32px;
+          height: 32px;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -245,7 +246,7 @@ export const LoginPage: React.FC = () => {
           background: rgba(220, 38, 38, 0.08);
         }
         .password-toggle-btn:active {
-          transform: scale(0.95);
+          transform: translateY(-50%) scale(0.95);
         }
 
         .animated-submit-btn {
@@ -390,7 +391,6 @@ export const LoginPage: React.FC = () => {
                   id="password"
                   type={showPassword ? 'text' : 'password'}
                   className="animated-input"
-                  style={{ paddingRight: '2.8rem' }}
                   placeholder="Enter password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
