@@ -13,7 +13,7 @@
  *   5. If refresh fails with 401 → dispatch auth:logout → frontend redirects to /login
  */
 
-const API_BASE_URL =
+export const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? '/api/v1'
@@ -25,25 +25,31 @@ interface RequestOptions extends RequestInit {
   _skipRefresh?: boolean;
 }
 
+export interface RefreshResult {
+  success: boolean;
+  isAuthFailure: boolean;
+}
+
 class ApiClient {
-  private refreshPromise: Promise<boolean> | null = null;
+  private refreshPromise: Promise<RefreshResult> | null = null;
 
   /**
    * Silently obtain a new access token by calling the refresh endpoint.
    * Utilizes a single-flight mutex to prevent concurrent refresh race conditions.
+   * Multiple concurrent 401s coalesce into exactly ONE POST /auth/refresh/ request.
    */
-  private async refreshAccessToken(): Promise<boolean> {
+  private async refreshAccessToken(): Promise<RefreshResult> {
     const refreshToken = localStorage.getItem('zamzam_refresh_token');
     // If there is no refresh token and no user, we are simply unauthenticated
     if (!refreshToken && !localStorage.getItem('zamzam_user')) {
-      return false;
+      return { success: false, isAuthFailure: true };
     }
 
     if (this.refreshPromise) {
       return this.refreshPromise;
     }
 
-    this.refreshPromise = (async () => {
+    this.refreshPromise = (async (): Promise<RefreshResult> => {
       try {
         const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
           method: 'POST',
@@ -53,26 +59,38 @@ class ApiClient {
         });
 
         if (!response.ok) {
-          // If server explicitly rejects the refresh token with 401 or 400
-          if (response.status === 401 || response.status === 400) {
+          const data = await response.json().catch(() => ({}));
+          const errDetail = typeof data?.detail === 'string' ? data.detail.toLowerCase() : '';
+          const isDefinitiveAuthFailure =
+            response.status === 401 ||
+            (response.status === 400 &&
+              (errDetail.includes('token') ||
+                errDetail.includes('invalid') ||
+                errDetail.includes('expired') ||
+                errDetail.includes('blacklisted')));
+
+          if (isDefinitiveAuthFailure) {
             const currentRt = localStorage.getItem('zamzam_refresh_token');
             if (currentRt === refreshToken) {
               this.clearTokens();
               this.dispatchLogout();
             }
+            return { success: false, isAuthFailure: true };
           }
-          return false;
+
+          // 500, 502, 503, 504 or other server issues are NOT auth rejections
+          return { success: false, isAuthFailure: false };
         }
 
         const data = await response.json().catch(() => ({}));
         if (data.access) {
           this.setTokens(data.access, data.refresh || refreshToken || '');
-          return true;
+          return { success: true, isAuthFailure: false };
         }
-        return false;
+        return { success: false, isAuthFailure: false };
       } catch {
-        // Network error during refresh: do not force logout, return false
-        return false;
+        // Network error during refresh: do not force logout, preserve session
+        return { success: false, isAuthFailure: false };
       } finally {
         this.refreshPromise = null;
       }
@@ -131,28 +149,31 @@ class ApiClient {
       throw new Error('Unable to connect to the Zamzam server. Please check your connection and try again.');
     }
 
-    // ── 401 handler: attempt single-flight token refresh then retry ──────────────────────
+    // ── 401 handler: attempt single-flight token refresh then retry ONCE ─────────
     if (
       response.status === 401 &&
       !_skipRefresh &&
       !endpoint.includes('/auth/login') &&
       !endpoint.includes('/auth/refresh')
     ) {
-      const refreshed = await this.refreshAccessToken();
+      const refreshResult = await this.refreshAccessToken();
 
-      if (refreshed) {
+      if (refreshResult.success) {
         // Update authorization header with newly refreshed access token
         const freshToken = localStorage.getItem('zamzam_access_token');
         if (freshToken) {
           headers['Authorization'] = `Bearer ${freshToken}`;
         }
+        // Retry fetch ONCE with fresh token and credentials
         response = await fetch(url, {
           ...fetchOptions,
           headers,
           credentials: 'include',
         });
-      } else {
+      } else if (refreshResult.isAuthFailure) {
         throw new Error('Session expired. Please log in again.');
+      } else {
+        throw new Error('Unable to connect to the Zamzam server. Please check your connection and try again.');
       }
     }
 
