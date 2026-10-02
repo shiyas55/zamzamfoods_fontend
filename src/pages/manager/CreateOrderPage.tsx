@@ -245,7 +245,7 @@ export const CreateOrderPage: React.FC = () => {
         // Map customerId -> Order (newest order takes precedence)
         const orderMap = new Map<string, Order>();
         existingOrders.forEach((ord) => {
-          const custId = ord.customer;
+          const custId = typeof ord.customer === 'string' ? ord.customer : (ord.customer as any)?.id || ord.customer_details?.id;
           if (custId && !orderMap.has(custId)) {
             orderMap.set(custId, ord);
           }
@@ -258,18 +258,20 @@ export const CreateOrderPage: React.FC = () => {
         const cashMap = new Map<string, number>();
         const gpayMap = new Map<string, number>();
         payments.forEach((p) => {
-          const custId = p.customer;
-          const amt = parseFloat(p.amount) || 0;
-          if (p.payment_method === 'CASH') {
-            cashMap.set(custId, (cashMap.get(custId) || 0) + amt);
-          } else if (p.payment_method === 'GPAY_UPI') {
-            gpayMap.set(custId, (gpayMap.get(custId) || 0) + amt);
+          const custId = typeof p.customer === 'string' ? p.customer : (p.customer as any)?.id;
+          if (custId) {
+            const amt = parseFloat(p.amount) || 0;
+            if (p.payment_method === 'CASH') {
+              cashMap.set(custId, (cashMap.get(custId) || 0) + amt);
+            } else if (p.payment_method === 'GPAY_UPI') {
+              gpayMap.set(custId, (gpayMap.get(custId) || 0) + amt);
+            }
           }
         });
 
         // Build spreadsheet rows populated from database and drafts
         const populatedRows: OrderRow[] = currentCustomers.map((cust) => {
-          const existingOrder = orderMap.get(cust.id);
+          const existingOrder = orderMap.get(cust.id) || orderMap.get(String(cust.id));
           let kQty = '';
           let rQty = '';
 
@@ -343,7 +345,31 @@ export const CreateOrderPage: React.FC = () => {
         });
 
         setUnlockedSelfOrderIds(new Set());
-        setRows(populatedRows);
+        setRows((prevRows) => {
+          if (prevRows.length === 0) return populatedRows;
+          const editingMap = new Map<string, OrderRow>();
+          prevRows.forEach((r) => {
+            if (r.status === 'SAVING' || r.status === 'ERROR' || (r.customerId && Boolean(draftOrderStorage.getDraft(targetDate, r.customerId)))) {
+              editingMap.set(r.customerId, r);
+            }
+          });
+          if (editingMap.size === 0) return populatedRows;
+          return populatedRows.map((newRow) => {
+            const editing = editingMap.get(newRow.customerId);
+            if (editing) {
+              return {
+                ...newRow,
+                kubbusQty: editing.kubbusQty,
+                romaliQty: editing.romaliQty,
+                cashAmount: editing.cashAmount,
+                gpayAmount: editing.gpayAmount,
+                status: editing.status,
+                errorMessage: editing.errorMessage,
+              };
+            }
+            return newRow;
+          });
+        });
       } catch (err: unknown) {
         console.error('Failed to load orders for date', targetDate, err);
         setError(`Failed to load existing orders for date ${targetDate}.`);
@@ -402,6 +428,35 @@ export const CreateOrderPage: React.FC = () => {
       loadOrdersForDate(newDate, customers, drivers);
     }
   };
+
+  // Real-Time Background Synchronization (every 20s + window focus + tab visibility)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!isSubmittingAll && customers.length > 0) {
+        loadOrdersForDate(orderDate, customers, drivers);
+      }
+    }, 20000);
+
+    const handleFocus = () => {
+      if (customers.length > 0) {
+        loadOrdersForDate(orderDate, customers, drivers);
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && customers.length > 0) {
+        loadOrdersForDate(orderDate, customers, drivers);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [orderDate, customers, drivers, isSubmittingAll, loadOrdersForDate]);
 
   // Open Business Day Handler
   const handleOpenDay = async (e: React.FormEvent) => {
@@ -1721,6 +1776,36 @@ export const CreateOrderPage: React.FC = () => {
           onChange={(e) => handleDateChange(e.target.value)}
           title="Select dispatch date to load or enter orders"
         />
+
+        {/* Live Real-Time Database Sync Badge */}
+        <span
+          className="badge"
+          style={{
+            height: '34px',
+            padding: '0 0.65rem',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            background: '#ecfdf5',
+            color: '#065f46',
+            border: '1px solid #a7f3d0',
+            fontSize: '0.78rem',
+            fontWeight: 600,
+          }}
+          title="Live database sync is active: automatically polls every 20s and upon window focus"
+        >
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              backgroundColor: '#10b981',
+              display: 'inline-block',
+              boxShadow: '0 0 0 2px rgba(16, 185, 129, 0.3)',
+            }}
+          />
+          <span>Live Sync</span>
+        </span>
 
         {/* Refresh Orders Button */}
         <button

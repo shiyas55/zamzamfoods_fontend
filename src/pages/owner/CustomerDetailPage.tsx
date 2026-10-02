@@ -2,13 +2,14 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { customerService } from '../../services/customerService';
 import { routeService } from '../../services/routeService';
+import { orderService } from '../../services/orderService';
 import { CustomerDetailSummary, CustomerPricingOverviewItem, Order, Route } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
 import { 
   ArrowLeft, Store, Phone, MapPin, Tag, ShoppingBag, 
   CreditCard, Truck, Plus, Edit2, CheckCircle, AlertTriangle, X,
   Repeat, FileText, MessageSquare, ExternalLink, Copy, Check, Smartphone, Send,
-  Trash2, CheckCircle2, AlertCircle
+  Trash2, CheckCircle2, AlertCircle, RefreshCw
 } from 'lucide-react';
 import { InvoiceModal } from '../../components/InvoiceModal';
 import { openWhatsApp, generateBalanceReminderMessage, generateInvoiceMessage } from '../../utils/whatsappUtils';
@@ -71,6 +72,21 @@ export const CustomerDetailPage: React.FC = () => {
   // Active Tab: 'pricing' | 'orders' | 'payments' | 'deliveries'
   const [activeTab, setActiveTab] = useState<'pricing' | 'orders' | 'payments' | 'deliveries'>('pricing');
   const [selectedOrderForInvoice, setSelectedOrderForInvoice] = useState<Order | null>(null);
+  const [customerOrders, setCustomerOrders] = useState<Order[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+
+  const loadCustomerOrders = async () => {
+    if (!id) return;
+    try {
+      setOrdersLoading(true);
+      const orders = await orderService.getOrders({ customer: id });
+      setCustomerOrders(orders);
+    } catch (e) {
+      console.error('Failed to load full orders for customer:', e);
+    } finally {
+      setOrdersLoading(false);
+    }
+  };
 
   const loadCustomerData = async () => {
     if (!id) return;
@@ -95,7 +111,16 @@ export const CustomerDetailPage: React.FC = () => {
 
   useEffect(() => {
     loadCustomerData();
+    if (id) {
+      loadCustomerOrders();
+    }
   }, [id]);
+
+  useEffect(() => {
+    if (activeTab === 'orders' && id) {
+      loadCustomerOrders();
+    }
+  }, [activeTab, id]);
 
   const handleOpenEditModal = () => {
     if (!summary?.customer) return;
@@ -729,127 +754,160 @@ export const CustomerDetailPage: React.FC = () => {
       )}
 
       {/* Tab 2: Order History */}
-      {activeTab === 'orders' && (
-        <div className="card" style={{ padding: '1.5rem' }}>
-          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '1rem' }}>Historical Orders</h3>
-          <div className="table-container">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Order #</th>
-                  <th>Date</th>
-                  <th>Items & Historical Rates</th>
-                  <th>Total Amount</th>
-                  <th>Order Status</th>
-                  <th>Delivery</th>
-                  <th style={{ textAlign: 'right' }}>Invoice & Share</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summary.recent_orders && summary.recent_orders.length > 0 ? (
-                  summary.recent_orders.map((ord) => (
-                    <tr key={ord.id}>
-                      <td>
-                        <div style={{ fontWeight: 700 }}>{ord.order_number}</div>
-                        {ord.source === 'CUSTOMER_LINK' && (
-                          <span
-                            className="badge badge-info"
-                            style={{
-                              fontSize: '0.68rem',
-                              padding: '0.1rem 0.4rem',
-                              marginTop: '0.2rem',
-                              display: 'inline-block',
-                              background: '#dcfce7',
-                              color: '#15803d',
-                              border: '1px solid #86efac',
-                            }}
-                          >
-                            📱 Self-Order
+      {activeTab === 'orders' && (() => {
+        const displayOrders = customerOrders.length > 0 ? customerOrders : (summary.recent_orders || []);
+        return (
+          <div className="card" style={{ padding: '1.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>Historical Orders</h3>
+                <span className="badge badge-neutral" style={{ fontSize: '0.78rem' }}>
+                  {displayOrders.length} order{displayOrders.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  loadCustomerOrders();
+                  loadCustomerData();
+                }}
+                disabled={ordersLoading}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                title="Refresh customer order history from database"
+              >
+                <RefreshCw size={13} className={ordersLoading ? 'animate-spin' : ''} />
+                <span>{ordersLoading ? 'Syncing...' : 'Refresh Orders'}</span>
+              </button>
+            </div>
+            <div className="table-container">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Order #</th>
+                    <th>Date</th>
+                    <th>Items & Historical Rates</th>
+                    <th>Total Amount</th>
+                    <th>Order Status</th>
+                    <th>Delivery</th>
+                    <th style={{ textAlign: 'right' }}>Invoice & Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayOrders.length > 0 ? (
+                    displayOrders.map((ord) => (
+                      <tr key={ord.id}>
+                        <td>
+                          <div style={{ fontWeight: 700 }}>{ord.order_number}</div>
+                          {ord.source === 'CUSTOMER_LINK' && (
+                            <span
+                              className="badge badge-info"
+                              style={{
+                                fontSize: '0.68rem',
+                                padding: '0.1rem 0.4rem',
+                                marginTop: '0.2rem',
+                                display: 'inline-block',
+                                background: '#dcfce7',
+                                color: '#15803d',
+                                border: '1px solid #86efac',
+                              }}
+                            >
+                              📱 Self-Order
+                            </span>
+                          )}
+                        </td>
+                        <td>{formatDate(ord.order_date)}</td>
+                        <td>
+                          <div style={{ fontSize: '0.85rem' }}>
+                            {ord.items?.map((it) => {
+                              const pName = it.product_details?.name || (it as any).product_name || 'Item';
+                              return (
+                                <div key={it.id} style={{ display: 'flex', gap: '0.5rem' }}>
+                                  <span>{pName}:</span>
+                                  <strong>{it.quantity} packs</strong>
+                                  <span style={{ color: 'var(--text-muted)' }}>@ {formatCurrency(it.unit_price)}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </td>
+                        <td style={{ fontWeight: 800, color: 'var(--text-primary)' }}>
+                          {formatCurrency(ord.total_amount)}
+                        </td>
+                        <td>
+                          <span className={`badge ${
+                            ord.status === 'DELIVERED' ? 'badge-success' :
+                            ord.status === 'NOT_DELIVERED' ? 'badge-danger' : 'badge-neutral'
+                          }`}>
+                            {ord.status}
                           </span>
-                        )}
-                      </td>
-                      <td>{formatDate(ord.order_date)}</td>
-                      <td>
-                        <div style={{ fontSize: '0.85rem' }}>
-                          {ord.items?.map((it) => (
-                            <div key={it.id} style={{ display: 'flex', gap: '0.5rem' }}>
-                              <span>{it.product_details?.name || 'Item'}:</span>
-                              <strong>{it.quantity} packs</strong>
-                              <span style={{ color: 'var(--text-muted)' }}>@ {formatCurrency(it.unit_price)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </td>
-                      <td style={{ fontWeight: 800, color: 'var(--text-primary)' }}>
-                        {formatCurrency(ord.total_amount)}
-                      </td>
-                      <td>
-                        <span className={`badge ${
-                          ord.status === 'DELIVERED' ? 'badge-success' :
-                          ord.status === 'NOT_DELIVERED' ? 'badge-danger' : 'badge-neutral'
-                        }`}>
-                          {ord.status}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="badge badge-neutral">
-                          {ord.delivery_status || 'ASSIGNED'}
-                        </span>
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end' }}>
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => setSelectedOrderForInvoice(ord as unknown as Order)}
-                            title="View & Print Professional Invoice"
-                            style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}
-                          >
-                            <FileText size={13} />
-                            <span>Invoice</span>
-                          </button>
-                          {isWhatsAppEnabled && (
+                        </td>
+                        <td>
+                          <span className="badge badge-neutral">
+                            {ord.delivery_status || 'ASSIGNED'}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <div style={{ display: 'flex', gap: '0.4rem', justifyContent: 'flex-end' }}>
                             <button
                               className="btn btn-secondary btn-sm"
                               onClick={() => {
-                                const items = (ord.items || []).map((it) => ({
-                                  name: it.product_details?.name || 'Product',
-                                  quantity: it.quantity,
-                                  unitPrice: it.unit_price,
-                                  subtotal: it.subtotal || (Number(it.unit_price) * it.quantity).toFixed(2),
-                                }));
-                                const msg = generateInvoiceMessage({
-                                  customerName: customer.name,
-                                  orderNumber: ord.order_number,
-                                  date: ord.order_date,
-                                  items,
-                                  totalAmount: ord.total_amount,
-                                  outstandingBalance: summary.outstanding_balance,
-                                });
-                                openWhatsApp(customer.phone, msg);
+                                const fullOrder: Order = {
+                                  ...ord,
+                                  customer_details: ord.customer_details || summary.customer,
+                                } as Order;
+                                setSelectedOrderForInvoice(fullOrder);
                               }}
-                              title="Share on WhatsApp"
-                              style={{ color: '#059669', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                              title="View & Print Professional Invoice"
+                              style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}
                             >
-                              <MessageSquare size={13} />
-                              <span>Share</span>
+                              <FileText size={13} />
+                              <span>Invoice</span>
                             </button>
-                          )}
-                        </div>
+                            {isWhatsAppEnabled && (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => {
+                                  const items = (ord.items || []).map((it) => ({
+                                    name: it.product_details?.name || (it as any).product_name || 'Product',
+                                    quantity: it.quantity,
+                                    unitPrice: it.unit_price,
+                                    subtotal: it.subtotal || (Number(it.unit_price) * it.quantity).toFixed(2),
+                                  }));
+                                  const msg = generateInvoiceMessage({
+                                    customerName: summary.customer.name,
+                                    orderNumber: ord.order_number,
+                                    date: ord.order_date,
+                                    items,
+                                    totalAmount: ord.total_amount,
+                                    outstandingBalance: summary.outstanding_balance,
+                                  });
+                                  openWhatsApp(summary.customer.phone, msg);
+                                }}
+                                title="Share on WhatsApp"
+                              >
+                                <Send size={13} />
+                                <span>WhatsApp</span>
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={7} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                        No orders recorded yet for this customer.
                       </td>
                     </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
-                      No order records found for this customer.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
+
 
       {/* Tab 3: Payment History */}
       {activeTab === 'payments' && (
