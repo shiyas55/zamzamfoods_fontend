@@ -3,15 +3,17 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { customerService } from '../../services/customerService';
 import { routeService } from '../../services/routeService';
 import { orderService } from '../../services/orderService';
-import { CustomerDetailSummary, CustomerPricingOverviewItem, Order, Route } from '../../types';
+import { paymentService } from '../../services/paymentService';
+import { CustomerDetailSummary, CustomerPricingOverviewItem, Order, Payment, Route } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
 import { 
   ArrowLeft, Store, Phone, MapPin, Tag, ShoppingBag, 
   CreditCard, Truck, Plus, Edit2, CheckCircle, AlertTriangle, X,
   Repeat, FileText, MessageSquare, ExternalLink, Copy, Check, Smartphone, Send,
-  Trash2, CheckCircle2, AlertCircle, RefreshCw
+  Trash2, CheckCircle2, AlertCircle, RefreshCw, Printer
 } from 'lucide-react';
 import { InvoiceModal } from '../../components/InvoiceModal';
+import { CustomerStatementModal } from '../../components/CustomerStatementModal';
 import { openWhatsApp, generateBalanceReminderMessage, generateInvoiceMessage } from '../../utils/whatsappUtils';
 import { useSettings } from '../../context/SettingsContext';
 
@@ -72,8 +74,11 @@ export const CustomerDetailPage: React.FC = () => {
   // Active Tab: 'pricing' | 'orders' | 'payments' | 'deliveries'
   const [activeTab, setActiveTab] = useState<'pricing' | 'orders' | 'payments' | 'deliveries'>('pricing');
   const [selectedOrderForInvoice, setSelectedOrderForInvoice] = useState<Order | null>(null);
+  const [isStatementModalOpen, setIsStatementModalOpen] = useState(false);
   const [customerOrders, setCustomerOrders] = useState<Order[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [customerPayments, setCustomerPayments] = useState<Payment[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
 
   const loadCustomerOrders = async () => {
     if (!id) return;
@@ -85,6 +90,19 @@ export const CustomerDetailPage: React.FC = () => {
       console.error('Failed to load full orders for customer:', e);
     } finally {
       setOrdersLoading(false);
+    }
+  };
+
+  const loadCustomerPayments = async () => {
+    if (!id) return;
+    try {
+      setPaymentsLoading(true);
+      const payments = await paymentService.getPayments({ customer: id });
+      setCustomerPayments(payments);
+    } catch (e) {
+      console.error('Failed to load full payments for customer:', e);
+    } finally {
+      setPaymentsLoading(false);
     }
   };
 
@@ -113,12 +131,16 @@ export const CustomerDetailPage: React.FC = () => {
     loadCustomerData();
     if (id) {
       loadCustomerOrders();
+      loadCustomerPayments();
     }
   }, [id]);
 
   useEffect(() => {
     if (activeTab === 'orders' && id) {
       loadCustomerOrders();
+    }
+    if (activeTab === 'payments' && id) {
+      loadCustomerPayments();
     }
   }, [activeTab, id]);
 
@@ -325,6 +347,16 @@ export const CustomerDetailPage: React.FC = () => {
 
           <button
             className="btn btn-secondary btn-sm"
+            onClick={() => setIsStatementModalOpen(true)}
+            title="View & Print Customer Account Statement"
+            style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: '#b91c1c' }}
+          >
+            <Printer size={14} />
+            <span>Print Statement</span>
+          </button>
+
+          <button
+            className="btn btn-secondary btn-sm"
             onClick={() => setIsDeleteModalOpen(true)}
             title="Delete Customer Shop"
             style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: '#dc2626' }}
@@ -361,10 +393,10 @@ export const CustomerDetailPage: React.FC = () => {
         className="card"
         style={{
           padding: '1rem 1.25rem',
-          marginBottom: '1.5rem',
-          background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(59, 130, 246, 0.04) 100%)',
-          border: '1px solid rgba(16, 185, 129, 0.35)',
-          borderRadius: 'var(--radius-lg)',
+          marginBottom: '1.25rem',
+          background: '#f8fafc',
+          border: '1px solid #cbd5e1',
+          borderRadius: 'var(--radius-md)',
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
@@ -492,7 +524,7 @@ export const CustomerDetailPage: React.FC = () => {
       {/* Prompt 3: Last Order Card + Repeat Order & Frequent Order Info */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
         {/* Last Order & Repeat Order */}
-        <div className="card" style={{ padding: '1.25rem', border: '1px solid #fed7aa', background: 'linear-gradient(to right bottom, #fffbeb, #ffffff)' }}>
+        <div className="card" style={{ padding: '1.25rem', border: '1px solid #fed7aa', background: '#fffbeb' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span style={{ fontSize: '1.1rem' }}>🛍️</span>
@@ -509,7 +541,7 @@ export const CustomerDetailPage: React.FC = () => {
 
           {summary.last_order ? (
             <div>
-              <div style={{ background: 'rgba(255,255,255,0.85)', borderRadius: '8px', padding: '0.75rem', marginBottom: '0.85rem', border: '1px solid #fed7aa' }}>
+              <div style={{ background: '#ffffff', borderRadius: '6px', padding: '0.75rem', marginBottom: '0.85rem', border: '1px solid #fed7aa' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', fontSize: '0.85rem' }}>
                   {summary.last_order.items.map((it) => (
                     <div key={it.product_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -550,7 +582,7 @@ export const CustomerDetailPage: React.FC = () => {
                       },
                     });
                   }}
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#dc2626' }}
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', background: '#b91c1c' }}
                 >
                   <Repeat size={14} />
                   <span>Repeat Last Order</span>
@@ -565,7 +597,7 @@ export const CustomerDetailPage: React.FC = () => {
         </div>
 
         {/* Frequent Order Information */}
-        <div className="card" style={{ padding: '1.25rem', border: '1px solid #fecaca', background: 'linear-gradient(to right bottom, #fef2f2, #ffffff)' }}>
+        <div className="card" style={{ padding: '1.25rem', border: '1px solid #fecaca', background: '#fef2f2' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
             <span style={{ fontSize: '1.1rem' }}>📊</span>
             <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--primary-dark)', margin: 0 }}>
@@ -611,8 +643,18 @@ export const CustomerDetailPage: React.FC = () => {
             </div>
           </div>
 
-          {isWhatsAppEnabled && (
-            <div style={{ marginTop: '0.85rem', display: 'flex', gap: '0.5rem' }}>
+          <div style={{ marginTop: '0.85rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => setIsStatementModalOpen(true)}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#b91c1c' }}
+              title="Print Customer Statement and Ledger"
+            >
+              <Printer size={14} />
+              <span>Print Account Statement</span>
+            </button>
+
+            {isWhatsAppEnabled && (
               <button
                 className="btn btn-secondary btn-sm"
                 onClick={() => {
@@ -629,8 +671,8 @@ export const CustomerDetailPage: React.FC = () => {
                 <MessageSquare size={14} />
                 <span>Share Balance on WhatsApp</span>
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
       <div style={{ display: 'flex', gap: '0.5rem', borderBottom: '1px solid var(--border)', marginBottom: '1.5rem' }}>
@@ -648,7 +690,7 @@ export const CustomerDetailPage: React.FC = () => {
           onClick={() => setActiveTab('orders')}
         >
           <ShoppingBag size={16} />
-          <span>Order History ({summary.recent_orders?.length || 0})</span>
+          <span>Order History ({customerOrders.length > 0 ? customerOrders.length : (summary.recent_orders?.length || 0)})</span>
         </button>
         <button
           className={`btn ${activeTab === 'payments' ? 'btn-primary' : 'btn-secondary'}`}
@@ -656,7 +698,7 @@ export const CustomerDetailPage: React.FC = () => {
           onClick={() => setActiveTab('payments')}
         >
           <CreditCard size={16} />
-          <span>Payment History ({summary.recent_payments?.length || 0})</span>
+          <span>Payment History ({customerPayments.length > 0 ? customerPayments.length : (summary.recent_payments?.length || 0)})</span>
         </button>
         <button
           className={`btn ${activeTab === 'deliveries' ? 'btn-primary' : 'btn-secondary'}`}
@@ -910,51 +952,91 @@ export const CustomerDetailPage: React.FC = () => {
 
 
       {/* Tab 3: Payment History */}
-      {activeTab === 'payments' && (
-        <div className="card" style={{ padding: '1.5rem' }}>
-          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '1rem' }}>Payment Collections</h3>
-          <div className="table-container">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Receipt #</th>
-                  <th>Date</th>
-                  <th>Method</th>
-                  <th>Amount</th>
-                  <th>Collected By</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summary.recent_payments && summary.recent_payments.length > 0 ? (
-                  summary.recent_payments.map((p) => (
-                    <tr key={p.id}>
-                      <td style={{ fontWeight: 700 }}>{p.payment_number}</td>
-                      <td>{formatDate(p.received_at)}</td>
-                      <td>
-                        <span className="badge badge-neutral">{p.payment_method}</span>
-                      </td>
-                      <td style={{ fontWeight: 800, color: '#10b981' }}>
-                        {formatCurrency(p.amount)}
-                      </td>
-                      <td>{p.collected_by_name || 'Driver / Staff'}</td>
-                      <td>
-                        <span className="badge badge-success">{p.status}</span>
+      {activeTab === 'payments' && (() => {
+        const displayPayments = customerPayments.length > 0 ? customerPayments : (summary.recent_payments || []);
+        return (
+          <div className="card" style={{ padding: '1.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: 0 }}>Payment Collections</h3>
+                <span className="badge badge-neutral" style={{ fontSize: '0.78rem' }}>
+                  {displayPayments.length} payment{displayPayments.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  loadCustomerPayments();
+                  loadCustomerData();
+                }}
+                disabled={paymentsLoading}
+                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                title="Refresh customer payment collections from database"
+              >
+                <RefreshCw size={13} className={paymentsLoading ? 'animate-spin' : ''} />
+                <span>{paymentsLoading ? 'Syncing...' : 'Refresh Payments'}</span>
+              </button>
+            </div>
+            <div className="table-container">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Receipt #</th>
+                    <th>Date</th>
+                    <th>Method</th>
+                    <th>Amount</th>
+                    <th>Collected By</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayPayments.length > 0 ? (
+                    displayPayments.map((p) => (
+                      <tr key={p.id}>
+                        <td style={{ fontWeight: 700 }}>
+                          <div>{p.payment_number}</div>
+                          {p.reference_number && (
+                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                              Ref: {p.reference_number}
+                            </div>
+                          )}
+                        </td>
+                        <td>{formatDate(p.received_at)}</td>
+                        <td>
+                          <span className="badge badge-neutral">
+                            {p.payment_method === 'GPAY_UPI' ? 'GPay / UPI' : 'Cash'}
+                          </span>
+                        </td>
+                        <td style={{ fontWeight: 800, color: '#10b981' }}>
+                          {formatCurrency(p.amount)}
+                        </td>
+                        <td>
+                          {p.collected_by_name ||
+                            (typeof p.collected_by === 'object' && p.collected_by
+                              ? (p.collected_by as any).name || (p.collected_by as any).username
+                              : 'Driver / Staff')}
+                        </td>
+                        <td>
+                          <span className={`badge ${p.status === 'COMPLETED' ? 'badge-success' : p.status === 'REVERSED' ? 'badge-danger' : 'badge-neutral'}`}>
+                            {p.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                        No payment records found for this customer.
                       </td>
                     </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
-                      No payment records found for this customer.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Tab 4: Delivery History */}
       {activeTab === 'deliveries' && (
@@ -1342,6 +1424,16 @@ export const CustomerDetailPage: React.FC = () => {
           order={selectedOrderForInvoice}
           customer={customer}
           onClose={() => setSelectedOrderForInvoice(null)}
+        />
+      )}
+
+      {/* Customer Account Statement Modal */}
+      {isStatementModalOpen && (summary?.customer || customer) && (
+        <CustomerStatementModal
+          customer={summary?.customer || customer}
+          summary={summary}
+          orders={customerOrders}
+          onClose={() => setIsStatementModalOpen(false)}
         />
       )}
     </div>
