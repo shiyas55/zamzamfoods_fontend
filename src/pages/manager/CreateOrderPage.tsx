@@ -29,6 +29,7 @@ import {
   ExternalLink,
   Smartphone,
   Edit,
+  Edit2,
   AlertTriangle,
   MessageCircle,
   Columns3,
@@ -36,8 +37,13 @@ import {
   Zap,
   Sparkles,
   Copy,
+  Clock,
+  Phone,
+  MapPin,
+  Printer,
 } from 'lucide-react';
 import { RealWhatsAppWebView } from '../../components/RealWhatsAppWebView';
+import { InvoiceModal } from '../../components/InvoiceModal';
 import { useSettings } from '../../context/SettingsContext';
 import { draftOrderStorage } from '../../utils/draftOrderStorage';
 
@@ -62,16 +68,21 @@ export interface OrderRow {
   driverName?: string;
   kubbusQty: string;
   romaliQty: string;
+  productQuantities?: Record<string, string>;
   cashAmount: string;
   gpayAmount: string;
   status: 'IDLE' | 'SAVING' | 'SAVED' | 'ERROR' | 'LOCKED';
   orderId?: string;
   orderNumber?: string;
+  listOrder?: number;
   errorMessage?: string;
   isCustomRow?: boolean;
   orderSource?: string;
   enteredByName?: string;
   enteredByRole?: string;
+  createdAt?: string;
+  submittedAt?: string;
+  customerCreatedAt?: string;
 }
 
 export const CreateOrderPage: React.FC = () => {
@@ -86,8 +97,13 @@ export const CreateOrderPage: React.FC = () => {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loading, setLoading] = useState(true);
   const [ordersLoading, setOrdersLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
+  const [lastUpdatedTime, setLastUpdatedTime] = useState<string>(() => {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  });
 
   // Date Option (Defaults to today YYYY-MM-DD or saved date)
   const [orderDate, setOrderDate] = useState<string>(() => {
@@ -110,13 +126,188 @@ export const CreateOrderPage: React.FC = () => {
   const [submittingDayOpen, setSubmittingDayOpen] = useState(false);
   const [dayOpenError, setDayOpenError] = useState<string | null>(null);
 
-  // Filter & Search Controls
-  const [routeFilter, setRouteFilter] = useState<string>('ALL');
-  const [sourceFilter, setSourceFilter] = useState<'ALL' | 'CUSTOMER_LINK' | 'MANAGER'>('ALL');
+  // Filter & Search Controls (Persisted to localStorage so reloads retain selected filters)
+  const [routeFilter, setRouteFilter] = useState<string>(() => {
+    return localStorage.getItem('zamzam_fast_order_route_filter') || 'ALL';
+  });
+  const [sourceFilter, setSourceFilter] = useState<'ALL' | 'CUSTOMER_LINK' | 'MANAGER'>(() => {
+    const saved = localStorage.getItem('zamzam_fast_order_source_filter');
+    if (saved === 'CUSTOMER_LINK' || saved === 'MANAGER' || saved === 'ALL') return saved;
+    return 'ALL';
+  });
+  const [orderSort, setOrderSort] = useState<'SHOP_CREATE_ASC' | 'CUSTOM'>(() => {
+    const saved = localStorage.getItem('zamzam_fast_order_sort');
+    if (saved === 'CUSTOM' || saved === 'SHOP_CREATE_ASC') {
+      return saved;
+    }
+    return 'SHOP_CREATE_ASC';
+  });
+
+  // Custom sort order: array of row IDs in user-defined order (drag & drop)
+  const [customSortOrder, setCustomSortOrder] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('zamzam_fast_custom_sort_order');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+
+  // Track unsaved custom sort changes and save success feedback
+  const [hasUnsavedCustomOrder, setHasUnsavedCustomOrder] = useState<boolean>(false);
+  const [saveCustomOrderSuccess, setSaveCustomOrderSuccess] = useState<boolean>(false);
+  // Whether custom order is in edit mode (showing drag/move handles, edit, remove, and save button)
+  const [isCustomEditing, setIsCustomEditing] = useState<boolean>(false);
+
+  // Show only shops with orders placed for the current date
+  const [showOrdersOnly, setShowOrdersOnly] = useState<boolean>(() => {
+    return localStorage.getItem('zamzam_show_orders_only') === 'true';
+  });
+
+  // Drag-and-drop state
+  const dragRowId = useRef<string | null>(null);
+  const dragOverRowId = useRef<string | null>(null);
+  const [isDragging, setIsDragging] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
+
+  // Auto-sync filter & sort preferences to localStorage on change
+  useEffect(() => {
+    localStorage.setItem('zamzam_fast_order_sort', orderSort);
+  }, [orderSort]);
+
+  useEffect(() => {
+    localStorage.setItem('zamzam_fast_order_route_filter', routeFilter);
+  }, [routeFilter]);
+
+  useEffect(() => {
+    localStorage.setItem('zamzam_fast_order_source_filter', sourceFilter);
+  }, [sourceFilter]);
+
+  useEffect(() => {
+    localStorage.setItem('zamzam_show_orders_only', String(showOrdersOnly));
+  }, [showOrdersOnly]);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [showSearchDropdown, setShowSearchDropdown] = useState<boolean>(false);
   const [whatsAppNavToken, setWhatsAppNavToken] = useState<number>(0);
   const searchContainerRef = useRef<HTMLDivElement>(null);
+  const [invoiceModalOrder, setInvoiceModalOrder] = useState<{ order: Order; customer?: Customer | null } | null>(null);
+
+  // Customer Details Edit Modal State
+  const [isEditCustomerModalOpen, setIsEditCustomerModalOpen] = useState(false);
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
+  const [editCustName, setEditCustName] = useState('');
+  const [editCustOwner, setEditCustOwner] = useState('');
+  const [editCustPhone, setEditCustPhone] = useState('');
+  const [editCustAltPhone, setEditCustAltPhone] = useState('');
+  const [editCustAddress, setEditCustAddress] = useState('');
+  const [editCustLandmark, setEditCustLandmark] = useState('');
+  const [editCustRoute, setEditCustRoute] = useState('');
+  const [editCustCreditLimit, setEditCustCreditLimit] = useState('5000.00');
+  const [editCustIsActive, setEditCustIsActive] = useState(true);
+  const [editCustNotes, setEditCustNotes] = useState('');
+  const [editCustError, setEditCustError] = useState<string | null>(null);
+  const [editCustSubmitting, setEditCustSubmitting] = useState(false);
+
+  // Time format helper functions
+  const formatOrderTime = (isoString?: string): string => {
+    if (!isoString) return '';
+    try {
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return '';
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+    } catch {
+      return '';
+    }
+  };
+
+  const formatOrderDateTime = (isoString?: string): string => {
+    if (!isoString) return '';
+    try {
+      const d = new Date(isoString);
+      if (isNaN(d.getTime())) return '';
+      const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+      const dateStr = d.toLocaleDateString([], { day: '2-digit', month: 'short' });
+      return `${dateStr}, ${timeStr}`;
+    } catch {
+      return '';
+    }
+  };
+
+  const handleOpenCustomerEdit = (customerId: string) => {
+    const cust = customers.find((c) => c.id === customerId);
+    if (!cust) return;
+    setEditingCustomer(cust);
+    setEditCustName(cust.name || '');
+    setEditCustOwner(cust.owner_name || '');
+    setEditCustPhone(cust.phone || '');
+    setEditCustAltPhone(cust.alternative_phone || '');
+    setEditCustAddress(cust.address || '');
+    setEditCustLandmark(cust.landmark || '');
+    const rId = typeof cust.route === 'string' ? cust.route : cust.route_details?.id || (routes[0]?.id ?? '');
+    setEditCustRoute(rId);
+    setEditCustCreditLimit(cust.credit_limit || '5000.00');
+    setEditCustIsActive(cust.is_active ?? true);
+    setEditCustNotes(cust.notes || '');
+    setEditCustError(null);
+    setIsEditCustomerModalOpen(true);
+  };
+
+  const handleSaveCustomerEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCustomer) return;
+    if (!editCustName.trim()) {
+      setEditCustError('Customer shop name is required.');
+      return;
+    }
+    if (!editCustPhone.trim()) {
+      setEditCustError('Phone number is required.');
+      return;
+    }
+
+    try {
+      setEditCustSubmitting(true);
+      setEditCustError(null);
+
+      const updated = await customerService.updateCustomer(editingCustomer.id, {
+        name: editCustName.trim(),
+        owner_name: editCustOwner.trim(),
+        phone: editCustPhone.trim(),
+        alternative_phone: editCustAltPhone.trim(),
+        address: editCustAddress.trim(),
+        landmark: editCustLandmark.trim(),
+        route: editCustRoute || undefined,
+        credit_limit: editCustCreditLimit,
+        is_active: editCustIsActive,
+        notes: editCustNotes.trim(),
+      });
+
+      // Update customers master list
+      setCustomers((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+
+      // Update in-memory order rows
+      const routeObj = routes.find((r) => r.id === updated.route || r.id === (updated.route_details as any)?.id);
+      setRows((prev) =>
+        prev.map((r) =>
+          r.customerId === updated.id
+            ? {
+                ...r,
+                customerName: updated.name,
+                customerOwner: updated.owner_name || '',
+                customerRouteId: (typeof updated.route === 'string' ? updated.route : updated.route_details?.id) || r.customerRouteId,
+                customerRoute: updated.route_details?.name || routeObj?.name || r.customerRoute,
+              }
+            : r
+        )
+      );
+
+      setIsEditCustomerModalOpen(false);
+      setSuccessBanner(`Updated details for shop "${updated.name}" successfully!`);
+      setTimeout(() => setSuccessBanner(null), 4000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to update customer details.';
+      setEditCustError(msg);
+    } finally {
+      setEditCustSubmitting(false);
+    }
+  };
 
   // Selected Customer for WhatsApp Panel
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
@@ -166,8 +357,8 @@ export const CreateOrderPage: React.FC = () => {
   // Option: Auto-Confirm & Dispatch to Route Driver on Submit
   const [autoConfirmDriver, setAutoConfirmDriver] = useState<boolean>(true);
 
-  // Customer-Specific Pricing Cache: customerId -> { kubbusPrice: number, romaliPrice: number }
-  const [pricingCache, setPricingCache] = useState<Record<string, { kubbusPrice: number; romaliPrice: number }>>({});
+  // Customer-Specific Pricing Cache: customerId -> { [productId]: price, kubbusPrice?: number, romaliPrice?: number }
+  const [pricingCache, setPricingCache] = useState<Record<string, Record<string, number> & { kubbusPrice?: number; romaliPrice?: number }>>({});
 
   // Rows State (All shops pre-populated)
   const [rows, setRows] = useState<OrderRow[]>([]);
@@ -178,13 +369,14 @@ export const CreateOrderPage: React.FC = () => {
 
   // Customer Self-Order Edit Confirmation Popup Modal State
   const [selfOrderModalRow, setSelfOrderModalRow] = useState<OrderRow | null>(null);
-  const [selfOrderPendingField, setSelfOrderPendingField] = useState<'kubbus' | 'romali' | 'cash' | 'gpay' | null>(null);
+  const [selfOrderPendingField, setSelfOrderPendingField] = useState<string | null>(null);
   const [unlockedSelfOrderIds, setUnlockedSelfOrderIds] = useState<Set<string>>(new Set());
 
   // Auto Data Entry / Bulk Assistant Modal State
   const [isAutoEntryModalOpen, setIsAutoEntryModalOpen] = useState(false);
   const [autoKubbusQty, setAutoKubbusQty] = useState('10');
   const [autoRomaliQty, setAutoRomaliQty] = useState('5');
+  const [autoProductQtys, setAutoProductQtys] = useState<Record<string, string>>({});
   const [autoTargetMode, setAutoTargetMode] = useState<'visible' | 'all' | 'empty'>('visible');
   const [isAutoLoading, setIsAutoLoading] = useState(false);
 
@@ -195,6 +387,10 @@ export const CreateOrderPage: React.FC = () => {
   const [newCustPhone, setNewCustPhone] = useState('');
   const [newCustAddress, setNewCustAddress] = useState('');
   const [newCustRoute, setNewCustRoute] = useState('');
+  const [newCustListOrder, setNewCustListOrder] = useState('');
+  const [newCustOrderNumber, setNewCustOrderNumber] = useState('');
+  const [newCustProductPrices, setNewCustProductPrices] = useState<Record<string, string>>({});
+  const [newCustProductQuantities, setNewCustProductQuantities] = useState<Record<string, string>>({});
   const [quickRouteName, setQuickRouteName] = useState('');
   const [isCreatingRoute, setIsCreatingRoute] = useState(false);
   const [newCustKubbusPrice, setNewCustKubbusPrice] = useState('35.00');
@@ -212,14 +408,46 @@ export const CreateOrderPage: React.FC = () => {
   const defaultKubbusPrice = parseFloat(kubbusProduct?.unit_price || '35.00');
   const defaultRomaliPrice = parseFloat(romaliProduct?.unit_price || '45.00');
 
+  // Dynamic Product Pricing Helper
+  const getProductPriceForCustomer = useCallback((customerId: string, product: Product): number => {
+    const cached = pricingCache[customerId]?.[product.id];
+    if (cached !== undefined) return cached;
+    if (kubbusProduct && product.id === kubbusProduct.id && pricingCache[customerId]?.kubbusPrice !== undefined) {
+      return pricingCache[customerId].kubbusPrice!;
+    }
+    if (romaliProduct && product.id === romaliProduct.id && pricingCache[customerId]?.romaliPrice !== undefined) {
+      return pricingCache[customerId].romaliPrice!;
+    }
+    return parseFloat(product.unit_price || '0');
+  }, [pricingCache, kubbusProduct, romaliProduct]);
+
+  // Open New Customer Modal Initializer
+  const handleOpenNewCustomerModal = () => {
+    const initPrices: Record<string, string> = {};
+    const initQtys: Record<string, string> = {};
+    products.forEach((p) => {
+      initPrices[p.id] = p.unit_price;
+      initQtys[p.id] = '';
+    });
+    setNewCustProductPrices(initPrices);
+    setNewCustProductQuantities(initQtys);
+    setNewCustListOrder(String(rows.length + 1));
+    setNewCustOrderNumber('');
+    setNewCustError(null);
+    setIsNewCustModalOpen(true);
+  };
+
   // Load existing orders & payments from database for the selected date
   const loadOrdersForDate = useCallback(
-    async (targetDate: string, currentCustomers: Customer[], currentDrivers: Driver[]) => {
+    async (targetDate: string, currentCustomers: Customer[], currentDrivers: Driver[], isBackground = false) => {
       if (currentCustomers.length === 0) {
         setRows([]);
         return;
       }
-      setOrdersLoading(true);
+      if (!isBackground) {
+        setOrdersLoading(true);
+      }
+      setIsSyncing(true);
       setError(null);
 
       try {
@@ -244,7 +472,12 @@ export const CreateOrderPage: React.FC = () => {
 
         // Map customerId -> Order (newest order takes precedence)
         const orderMap = new Map<string, Order>();
-        existingOrders.forEach((ord) => {
+        const sortedOrders = [...existingOrders].sort((a, b) => {
+          const tA = new Date(a.submitted_at || a.created_at || 0).getTime();
+          const tB = new Date(b.submitted_at || b.created_at || 0).getTime();
+          return tB - tA;
+        });
+        sortedOrders.forEach((ord) => {
           const custId = typeof ord.customer === 'string' ? ord.customer : (ord.customer as any)?.id || ord.customer_details?.id;
           if (custId && !orderMap.has(custId)) {
             orderMap.set(custId, ord);
@@ -274,9 +507,14 @@ export const CreateOrderPage: React.FC = () => {
           const existingOrder = orderMap.get(cust.id) || orderMap.get(String(cust.id));
           let kQty = '';
           let rQty = '';
+          const productQuantities: Record<string, string> = {};
 
           if (existingOrder && existingOrder.items) {
             existingOrder.items.forEach((item) => {
+              const pid = item.product || item.product_details?.id;
+              if (pid && item.quantity > 0) {
+                productQuantities[pid] = String(item.quantity);
+              }
               const pCode = (item.product_details?.code || '').toUpperCase();
               const pName = (item.product_details?.name || '').toLowerCase();
               if (pCode === 'KBS' || pCode === 'KUB' || pName.includes('kubbus')) {
@@ -294,10 +532,22 @@ export const CreateOrderPage: React.FC = () => {
           // Restore unsubmitted draft if no database order exists yet
           const draft = drafts[cust.id];
           if (!existingOrder && draft) {
+            if (draft.productQuantities) {
+              Object.assign(productQuantities, draft.productQuantities);
+            }
             if (!kQty && draft.kubbusQty) kQty = draft.kubbusQty;
             if (!rQty && draft.romaliQty) rQty = draft.romaliQty;
             if (cAmt === undefined && draft.cashAmount) cAmt = parseFloat(draft.cashAmount) || undefined;
             if (gAmt === undefined && draft.gpayAmount) gAmt = parseFloat(draft.gpayAmount) || undefined;
+          }
+
+          // Check if customer notes contain a stop number, e.g. [Stop #3]
+          let parsedStopNumber: number | undefined;
+          if (cust.notes) {
+            const stopMatch = cust.notes.match(/\[(?:Stop|Order)\s*#?(\d+)\]/i);
+            if (stopMatch && stopMatch[1]) {
+              parsedStopNumber = parseInt(stopMatch[1], 10);
+            }
           }
 
           const custRouteId = cust.route || cust.route_details?.id || '';
@@ -333,14 +583,19 @@ export const CreateOrderPage: React.FC = () => {
             driverName: driverDisplay,
             kubbusQty: kQty,
             romaliQty: rQty,
+            productQuantities,
             cashAmount: cAmt !== undefined ? cAmt.toFixed(2) : '',
             gpayAmount: gAmt !== undefined ? gAmt.toFixed(2) : '',
             status: isLocked ? 'LOCKED' : (existingOrder ? 'SAVED' : 'IDLE'),
             orderId: existingOrder?.id,
             orderNumber: existingOrder?.order_number,
+            listOrder: parsedStopNumber,
             orderSource: existingOrder?.source,
             enteredByName: existingOrder?.entered_by_name,
             enteredByRole: existingOrder?.entered_by_role,
+            createdAt: existingOrder?.created_at,
+            submittedAt: existingOrder?.submitted_at,
+            customerCreatedAt: cust.created_at,
           };
         });
 
@@ -359,6 +614,7 @@ export const CreateOrderPage: React.FC = () => {
             if (editing) {
               return {
                 ...newRow,
+                productQuantities: editing.productQuantities || newRow.productQuantities,
                 kubbusQty: editing.kubbusQty,
                 romaliQty: editing.romaliQty,
                 cashAmount: editing.cashAmount,
@@ -372,9 +628,13 @@ export const CreateOrderPage: React.FC = () => {
         });
       } catch (err: unknown) {
         console.error('Failed to load orders for date', targetDate, err);
-        setError(`Failed to load existing orders for date ${targetDate}.`);
+        if (!isBackground) {
+          setError(`Failed to load existing orders for date ${targetDate}.`);
+        }
       } finally {
         setOrdersLoading(false);
+        setIsSyncing(false);
+        setLastUpdatedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       }
     },
     []
@@ -405,6 +665,12 @@ export const CreateOrderPage: React.FC = () => {
         if (kProd) setNewCustKubbusPrice(kProd.unit_price);
         if (rProd) setNewCustRomaliPrice(rProd.unit_price);
 
+        const initialAutoQtys: Record<string, string> = {};
+        prodList.forEach((p, idx) => {
+          initialAutoQtys[p.id] = idx === 0 ? '10' : idx === 1 ? '5' : '0';
+        });
+        setAutoProductQtys(initialAutoQtys);
+
         // Load existing orders from database for today's date
         await loadOrdersForDate(orderDate, custList, driverList);
       } catch (err: unknown) {
@@ -429,34 +695,17 @@ export const CreateOrderPage: React.FC = () => {
     }
   };
 
-  // Real-Time Background Synchronization (every 20s + window focus + tab visibility)
+  // User-Controlled Auto-Sync (Disabled by default so order table remains 100% stable without unexpected reloads)
   useEffect(() => {
+    if (!autoSyncEnabled) return;
     const timer = setInterval(() => {
       if (!isSubmittingAll && customers.length > 0) {
-        loadOrdersForDate(orderDate, customers, drivers);
+        loadOrdersForDate(orderDate, customers, drivers, true);
       }
-    }, 20000);
+    }, 60000);
 
-    const handleFocus = () => {
-      if (customers.length > 0) {
-        loadOrdersForDate(orderDate, customers, drivers);
-      }
-    };
-    window.addEventListener('focus', handleFocus);
-
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && customers.length > 0) {
-        loadOrdersForDate(orderDate, customers, drivers);
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener('focus', handleFocus);
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
-  }, [orderDate, customers, drivers, isSubmittingAll, loadOrdersForDate]);
+    return () => clearInterval(timer);
+  }, [autoSyncEnabled, orderDate, customers, drivers, isSubmittingAll, loadOrdersForDate]);
 
   // Open Business Day Handler
   const handleOpenDay = async (e: React.FormEvent) => {
@@ -480,7 +729,8 @@ export const CreateOrderPage: React.FC = () => {
       // Auto-focus first input
       setTimeout(() => {
         if (rows.length > 0) {
-          focusCell(0, 'kubbus');
+          const firstCol = products.length > 0 ? `prod_${products[0].id}` : 'kubbus';
+          focusCell(0, firstCol);
         }
       }, 150);
     } catch (err: unknown) {
@@ -492,35 +742,49 @@ export const CreateOrderPage: React.FC = () => {
   };
 
   // Fetch and cache custom pricing for customer
+  // Fetch and cache custom pricing for customer dynamically for all products
   const fetchCustomerPricing = async (custId: string) => {
     if (pricingCache[custId]) return pricingCache[custId];
 
     try {
       const pricingList = await customerService.getCustomerPricing(custId);
-      let kPrice = defaultKubbusPrice;
-      let rPrice = defaultRomaliPrice;
+      const entry: Record<string, number> & { kubbusPrice?: number; romaliPrice?: number } = {};
+
+      products.forEach((p) => {
+        entry[p.id] = parseFloat(p.unit_price || '0');
+      });
 
       pricingList.forEach((item) => {
+        const effPrice = parseFloat(item.effective_price);
+        entry[item.product_id] = effPrice;
         if (kubbusProduct && item.product_id === kubbusProduct.id) {
-          kPrice = parseFloat(item.effective_price);
+          entry.kubbusPrice = effPrice;
         }
         if (romaliProduct && item.product_id === romaliProduct.id) {
-          rPrice = parseFloat(item.effective_price);
+          entry.romaliPrice = effPrice;
         }
       });
 
-      const entry = { kubbusPrice: kPrice, romaliPrice: rPrice };
+      if (entry.kubbusPrice === undefined) entry.kubbusPrice = defaultKubbusPrice;
+      if (entry.romaliPrice === undefined) entry.romaliPrice = defaultRomaliPrice;
+
       setPricingCache((prev) => ({ ...prev, [custId]: entry }));
       return entry;
     } catch {
-      const fallback = { kubbusPrice: defaultKubbusPrice, romaliPrice: defaultRomaliPrice };
+      const fallback: Record<string, number> & { kubbusPrice: number; romaliPrice: number } = {
+        kubbusPrice: defaultKubbusPrice,
+        romaliPrice: defaultRomaliPrice,
+      };
+      products.forEach((p) => {
+        fallback[p.id] = parseFloat(p.unit_price || '0');
+      });
       setPricingCache((prev) => ({ ...prev, [custId]: fallback }));
       return fallback;
     }
   };
 
   // Keyboard navigation helper
-  const focusCell = (visibleIndex: number, col: 'kubbus' | 'romali' | 'cash' | 'gpay') => {
+  const focusCell = (visibleIndex: number, col: string) => {
     setTimeout(() => {
       const el = inputRefs.current[`${visibleIndex}_${col}`];
       if (el) {
@@ -533,7 +797,7 @@ export const CreateOrderPage: React.FC = () => {
 
   // Visible rows filtered by Route & Search Query
   const visibleRows = useMemo(() => {
-    return rows.filter((row) => {
+    const filtered = rows.filter((row) => {
       if (routeFilter !== 'ALL') {
         const selectedRouteObj = routes.find((r) => r.id === routeFilter);
         const matchesRoute =
@@ -562,7 +826,37 @@ export const CreateOrderPage: React.FC = () => {
 
       return true;
     });
-  }, [rows, routeFilter, sourceFilter, searchQuery, routes, customers]);
+
+    // Apply orders-only filter
+    const afterOrderFilter = showOrdersOnly
+      ? filtered.filter((r) => Boolean(r.orderId || r.submittedAt || r.createdAt || r.kubbusQty !== '0' || r.romaliQty !== '0'))
+      : filtered;
+
+    // Helper function for shop registered oldest first (Shop Registered: Oldest)
+    const sortByShopRegisteredOldest = (a: OrderRow, b: OrderRow) => {
+      const tA = new Date(a.customerCreatedAt || 0).getTime();
+      const tB = new Date(b.customerCreatedAt || 0).getTime();
+      if (tA !== 0 && tB !== 0 && tA !== tB) return tA - tB;
+      if (tA !== 0 && tB === 0) return -1;
+      if (tA === 0 && tB !== 0) return 1;
+      return a.customerName.localeCompare(b.customerName);
+    };
+
+    // Apply custom sort if selected
+    if (orderSort === 'CUSTOM' && customSortOrder.length > 0) {
+      return [...afterOrderFilter].sort((a, b) => {
+        const iA = customSortOrder.indexOf(a.rowId);
+        const iB = customSortOrder.indexOf(b.rowId);
+        if (iA !== -1 && iB !== -1) return iA - iB;
+        if (iA !== -1) return -1;
+        if (iB !== -1) return 1;
+        return sortByShopRegisteredOldest(a, b);
+      });
+    }
+
+    // Default & SHOP_CREATE_ASC: sort by Shop Registered (Oldest)
+    return [...afterOrderFilter].sort(sortByShopRegisteredOldest);
+  }, [rows, routeFilter, sourceFilter, searchQuery, orderSort, routes, customers, customSortOrder, showOrdersOnly]);
 
   // Synchronize single shared search state: auto-highlight matching customer across billing and WhatsApp
   useEffect(() => {
@@ -670,6 +964,7 @@ export const CreateOrderPage: React.FC = () => {
               orderDate,
               kubbusQty: updated.kubbusQty,
               romaliQty: updated.romaliQty,
+              productQuantities: updated.productQuantities,
               cashAmount: updated.cashAmount,
               gpayAmount: updated.gpayAmount,
               updatedAt: Date.now(),
@@ -682,15 +977,89 @@ export const CreateOrderPage: React.FC = () => {
     );
   };
 
+  // Dynamic Product Quantity Change Handler
+  const handleProductQtyChange = (rowId: string, productId: string, value: string) => {
+    const targetRow = rows.find((r) => r.rowId === rowId);
+    if (targetRow && targetRow.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(rowId)) {
+      setSelfOrderModalRow(targetRow);
+      setSelfOrderPendingField(`prod_${productId}`);
+      return;
+    }
+
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.rowId === rowId) {
+          const updatedQuantities = {
+            ...(r.productQuantities || {}),
+            [productId]: value,
+          };
+          let kQty = r.kubbusQty;
+          let rQty = r.romaliQty;
+          if (kubbusProduct && productId === kubbusProduct.id) {
+            kQty = value;
+          }
+          if (romaliProduct && productId === romaliProduct.id) {
+            rQty = value;
+          }
+
+          const updated: OrderRow = {
+            ...r,
+            productQuantities: updatedQuantities,
+            kubbusQty: kQty,
+            romaliQty: rQty,
+            status: 'IDLE' as const,
+          };
+
+          if (updated.customerId) {
+            draftOrderStorage.saveDraft({
+              customerId: updated.customerId,
+              orderDate,
+              kubbusQty: updated.kubbusQty,
+              romaliQty: updated.romaliQty,
+              productQuantities: updated.productQuantities,
+              cashAmount: updated.cashAmount,
+              gpayAmount: updated.gpayAmount,
+              updatedAt: Date.now(),
+            });
+          }
+          return updated;
+        }
+        return r;
+      })
+    );
+  };
+
+  // Set Custom Order Number or Stop Order on an existing row
+  const handleSetRowOrderDetails = (rowId: string, orderNum?: string, stopNum?: number) => {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.rowId === rowId) {
+          return {
+            ...r,
+            orderNumber: orderNum !== undefined ? orderNum : r.orderNumber,
+            listOrder: stopNum !== undefined ? stopNum : r.listOrder,
+            status: 'IDLE' as const,
+          };
+        }
+        return r;
+      })
+    );
+  };
+
   // Apply quantities from WhatsApp chat directly into the billing row
   const handleApplyWhatsAppOrder = (customerId: string, kubbus: string, romali: string) => {
     setRows((prev) =>
       prev.map((r) => {
         if (r.customerId === customerId) {
-          const updated = {
+          const updatedQuantities = { ...(r.productQuantities || {}) };
+          if (kubbusProduct) updatedQuantities[kubbusProduct.id] = kubbus;
+          if (romaliProduct) updatedQuantities[romaliProduct.id] = romali;
+
+          const updated: OrderRow = {
             ...r,
             kubbusQty: kubbus || r.kubbusQty,
             romaliQty: romali || r.romaliQty,
+            productQuantities: updatedQuantities,
             status: 'IDLE' as const,
           };
           draftOrderStorage.saveDraft({
@@ -698,6 +1067,7 @@ export const CreateOrderPage: React.FC = () => {
             orderDate,
             kubbusQty: updated.kubbusQty,
             romaliQty: updated.romaliQty,
+            productQuantities: updated.productQuantities,
             cashAmount: updated.cashAmount,
             gpayAmount: updated.gpayAmount,
             updatedAt: Date.now(),
@@ -710,20 +1080,49 @@ export const CreateOrderPage: React.FC = () => {
     setSelectedCustomerId(customerId);
   };
 
-  // Calculate financials for a row
+  // Calculate financials for a row dynamically across all products
   const getRowFinancials = (row: OrderRow) => {
-    const kQty = parseInt(row.kubbusQty, 10) || 0;
-    const rQty = parseInt(row.romaliQty, 10) || 0;
+    let rowTotal = 0;
+    let hasOrder = false;
+    let totalPieces = 0;
+    const itemQuantities: Record<string, number> = {};
 
+    const activeProducts = products.length > 0 ? products : [
+      ...(kubbusProduct ? [kubbusProduct] : []),
+      ...(romaliProduct ? [romaliProduct] : [])
+    ];
+
+    activeProducts.forEach((prod) => {
+      let qStr = row.productQuantities?.[prod.id];
+      if (qStr === undefined) {
+        if (kubbusProduct && prod.id === kubbusProduct.id) qStr = row.kubbusQty;
+        else if (romaliProduct && prod.id === romaliProduct.id) qStr = row.romaliQty;
+        else qStr = '';
+      }
+      const qty = parseInt(qStr || '0', 10) || 0;
+      itemQuantities[prod.id] = qty;
+      if (qty > 0) {
+        hasOrder = true;
+        totalPieces += qty;
+        const price = getProductPriceForCustomer(row.customerId, prod);
+        rowTotal += qty * price;
+      }
+    });
+
+    const kQty = itemQuantities[kubbusProduct?.id || ''] ?? (parseInt(row.kubbusQty, 10) || 0);
+    const rQty = itemQuantities[romaliProduct?.id || ''] ?? (parseInt(row.romaliQty, 10) || 0);
     const kPrice = pricingCache[row.customerId]?.kubbusPrice ?? defaultKubbusPrice;
     const rPrice = pricingCache[row.customerId]?.romaliPrice ?? defaultRomaliPrice;
+    if (activeProducts.length === 0) {
+      rowTotal = kQty * kPrice + rQty * rPrice;
+      hasOrder = kQty > 0 || rQty > 0;
+      totalPieces = kQty + rQty;
+    }
 
-    const rowTotal = kQty * kPrice + rQty * rPrice;
     const cash = parseFloat(row.cashAmount) || 0;
     const gpay = parseFloat(row.gpayAmount) || 0;
     const rowPaid = cash + gpay;
     const prevDue = parseFloat(row.customerBalance || '0') || 0;
-    // Current Outstanding Balance = Previous Due + Today's Order Bill - Today's Payments (Cash + GPay)
     const rowBalance = prevDue + rowTotal - rowPaid;
 
     return {
@@ -737,8 +1136,10 @@ export const CreateOrderPage: React.FC = () => {
       rowPaid,
       prevDue,
       rowBalance,
-      hasOrder: kQty > 0 || rQty > 0,
-      isValid: Boolean(row.customerId) && (kQty > 0 || rQty > 0 || cash > 0 || gpay > 0),
+      hasOrder,
+      totalPieces,
+      itemQuantities,
+      isValid: Boolean(row.customerId) && (hasOrder || cash > 0 || gpay > 0),
     };
   };
 
@@ -810,20 +1211,28 @@ export const CreateOrderPage: React.FC = () => {
       const assignedDriverId = row.driverId || routeDriver?.id || null;
 
       const items: Array<{ product_id: string; quantity: number; unit_price: string }> = [];
-      if (fin.kQty > 0 && kubbusProduct) {
-        items.push({
-          product_id: kubbusProduct.id,
-          quantity: fin.kQty,
-          unit_price: fin.kPrice.toFixed(2),
-        });
-      }
-      if (fin.rQty > 0 && romaliProduct) {
-        items.push({
-          product_id: romaliProduct.id,
-          quantity: fin.rQty,
-          unit_price: fin.rPrice.toFixed(2),
-        });
-      }
+      const activeProducts = products.length > 0 ? products : [
+        ...(kubbusProduct ? [kubbusProduct] : []),
+        ...(romaliProduct ? [romaliProduct] : [])
+      ];
+
+      activeProducts.forEach((prod) => {
+        let qStr = row.productQuantities?.[prod.id];
+        if (qStr === undefined) {
+          if (kubbusProduct && prod.id === kubbusProduct.id) qStr = row.kubbusQty;
+          else if (romaliProduct && prod.id === romaliProduct.id) qStr = row.romaliQty;
+          else qStr = '';
+        }
+        const qty = parseInt(qStr || '0', 10) || 0;
+        if (qty > 0) {
+          const price = getProductPriceForCustomer(row.customerId, prod);
+          items.push({
+            product_id: prod.id,
+            quantity: qty,
+            unit_price: price.toFixed(2),
+          });
+        }
+      });
 
       let order: Order | undefined;
 
@@ -839,6 +1248,7 @@ export const CreateOrderPage: React.FC = () => {
             customer_id: row.customerId,
             driver_id: assignedDriverId,
             order_date: orderDate,
+            order_number: row.orderNumber?.trim() || undefined,
             items,
             notes: 'Fast wholesale daily entry',
           });
@@ -875,6 +1285,8 @@ export const CreateOrderPage: React.FC = () => {
                 orderNumber: order?.order_number || r.orderNumber,
                 driverId: order?.driver || assignedDriverId || r.driverId || undefined,
                 driverName: order?.driver_name || routeDriver?.driver_name || r.driverName || undefined,
+                createdAt: order?.created_at || r.createdAt,
+                submittedAt: order?.submitted_at || r.submittedAt,
               }
             : r
         )
@@ -900,6 +1312,17 @@ export const CreateOrderPage: React.FC = () => {
             : r
         )
       );
+    }
+  };
+
+  const handlePrintRowOrder = async (row: OrderRow) => {
+    if (!row.orderId) return;
+    try {
+      const fullOrder = await orderService.getOrder(row.orderId);
+      const cust = customers.find((c) => c.id === row.customerId) || fullOrder.customer_details || null;
+      setInvoiceModalOrder({ order: fullOrder, customer: cust });
+    } catch (err) {
+      console.error('Failed to load order for printing:', err);
     }
   };
 
@@ -986,6 +1409,11 @@ export const CreateOrderPage: React.FC = () => {
 
   // KPI Summary Statistics
   const sheetStats = useMemo(() => {
+    const productTotals: Record<string, number> = {};
+    products.forEach((p) => {
+      productTotals[p.id] = 0;
+    });
+
     return rows.reduce(
       (acc, row) => {
         const fin = getRowFinancials(row);
@@ -993,6 +1421,10 @@ export const CreateOrderPage: React.FC = () => {
           acc.validShopsCount += 1;
           acc.totalKubbus += fin.kQty;
           acc.totalRomali += fin.rQty;
+          acc.totalPieces += fin.totalPieces;
+          products.forEach((p) => {
+            acc.productTotals[p.id] = (acc.productTotals[p.id] || 0) + (fin.itemQuantities[p.id] || 0);
+          });
           acc.totalBill += fin.rowTotal;
           acc.totalCash += fin.cash;
           acc.totalGPay += fin.gpay;
@@ -1004,13 +1436,15 @@ export const CreateOrderPage: React.FC = () => {
         validShopsCount: 0,
         totalKubbus: 0,
         totalRomali: 0,
+        totalPieces: 0,
+        productTotals,
         totalBill: 0,
         totalCash: 0,
         totalGPay: 0,
         totalDue: 0,
       }
     );
-  }, [rows, pricingCache, defaultKubbusPrice, defaultRomaliPrice]);
+  }, [rows, products, pricingCache, defaultKubbusPrice, defaultRomaliPrice, getProductPriceForCustomer]);
 
   // Count unsubmitted / modified orders ready to submit
   const pendingOrdersCount = useMemo(() => {
@@ -1018,7 +1452,7 @@ export const CreateOrderPage: React.FC = () => {
       const fin = getRowFinancials(r);
       return (fin.hasOrder || fin.cash > 0 || fin.gpay > 0) && (r.status === 'IDLE' || r.status === 'SAVING');
     }).length;
-  }, [rows]);
+  }, [rows, products, pricingCache, defaultKubbusPrice, defaultRomaliPrice, getProductPriceForCustomer]);
 
   // Count removed shops that could be restored
   const removedCount = useMemo(() => {
@@ -1026,52 +1460,89 @@ export const CreateOrderPage: React.FC = () => {
     return customers.filter((c) => !existingIds.has(c.id)).length;
   }, [rows, customers]);
 
+  // Dynamic Product Column Sequence for Fast Order Entry (Kubbus -> Romali -> Next Shop)
+  const getProductCols = useCallback((): string[] => {
+    return products.length > 0 ? products.map((p) => `prod_${p.id}`) : ['kubbus', 'romali'];
+  }, [products]);
+
+  // Dynamic Column Sequence for Keyboard Navigation
+  const getColSequence = useCallback((): string[] => {
+    const pCols = getProductCols();
+    return [...pCols, 'cash', 'gpay'];
+  }, [getProductCols]);
+
   /**
-   * Ultra-Fast Keyboard Entry Logic:
-   * 1. Kubbus -> Enter -> Romali Roti (same shop)
-   * 2. Romali Roti -> Enter -> Next Shop's Kubbus
-   * 3. Cash -> Enter -> GPay
-   * 4. GPay -> Enter -> Next Shop's Kubbus
-   * 5. Tab / Shift+Tab moves left / right
-   * 6. Arrow Up / Down jumps vertically between shops
+   * Ultra-Fast Product Keyboard Entry:
+   * Enter / Tab on products:
+   *   - Kubbus -> Romali Roti -> Next Shop's Kubbus! (Skips Cash & GPay)
+   * Enter / Tab on Cash:
+   *   - Cash -> GPay -> Next Shop's Cash
+   * Shift + Tab:
+   *   - Moves backwards between products / shops
+   * Arrow Up / Down:
+   *   - Jumps vertically between shops on the same column
    */
   const handleKeyDown = (
     e: React.KeyboardEvent<HTMLInputElement>,
     visibleIndex: number,
-    col: 'kubbus' | 'romali' | 'cash' | 'gpay'
+    col: string
   ) => {
-    if (e.key === 'Enter') {
+    const prodCols = getProductCols();
+    const isProdCol = prodCols.includes(col);
+
+    if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
       e.preventDefault();
-      if (col === 'kubbus') {
-        focusCell(visibleIndex, 'romali');
-      } else if (col === 'romali') {
-        if (visibleIndex < visibleRows.length - 1) {
-          focusCell(visibleIndex + 1, 'kubbus');
+      if (isProdCol) {
+        const pIdx = prodCols.indexOf(col);
+        if (pIdx >= 0 && pIdx < prodCols.length - 1) {
+          // Go to next product of the SAME shop (e.g. Kubbus -> Romali Roti)
+          focusCell(visibleIndex, prodCols[pIdx + 1]);
+        } else if (pIdx === prodCols.length - 1) {
+          // LAST product of this shop -> jump straight to NEXT SHOP's first product (e.g. Romali -> Next Shop's Kubbus)!
+          if (visibleIndex < visibleRows.length - 1) {
+            focusCell(visibleIndex + 1, prodCols[0]);
+          }
         }
-      } else if (col === 'cash') {
+        return;
+      }
+
+      // If user is manually focused on Cash or GPay:
+      if (col === 'cash') {
         focusCell(visibleIndex, 'gpay');
-      } else if (col === 'gpay') {
+        return;
+      }
+      if (col === 'gpay') {
         if (visibleIndex < visibleRows.length - 1) {
-          focusCell(visibleIndex + 1, 'kubbus');
+          focusCell(visibleIndex + 1, 'cash');
         }
+        return;
       }
       return;
     }
 
-    if (e.key === 'Tab' && !e.shiftKey) {
-      if (col === 'romali') {
+    if (e.key === 'Tab' && e.shiftKey) {
+      if (isProdCol) {
+        e.preventDefault();
+        const pIdx = prodCols.indexOf(col);
+        if (pIdx > 0) {
+          // Previous product of same shop
+          focusCell(visibleIndex, prodCols[pIdx - 1]);
+        } else if (pIdx === 0 && visibleIndex > 0) {
+          // Previous shop's last product
+          focusCell(visibleIndex - 1, prodCols[prodCols.length - 1]);
+        }
+        return;
+      }
+      if (col === 'gpay') {
         e.preventDefault();
         focusCell(visibleIndex, 'cash');
-      } else if (col === 'cash') {
-        e.preventDefault();
-        focusCell(visibleIndex, 'gpay');
-      } else if (col === 'gpay') {
-        if (visibleIndex < visibleRows.length - 1) {
-          e.preventDefault();
-          focusCell(visibleIndex + 1, 'kubbus');
-        }
+        return;
       }
-      return;
+      if (col === 'cash') {
+        e.preventDefault();
+        focusCell(visibleIndex, prodCols[prodCols.length - 1]);
+        return;
+      }
     }
 
     if (e.key === 'ArrowDown') {
@@ -1091,6 +1562,64 @@ export const CreateOrderPage: React.FC = () => {
     }
   };
 
+  // Move row up or down in Custom Order
+  const handleMoveCustomRow = (rowId: string, direction: 'UP' | 'DOWN') => {
+    const currentOrder = customSortOrder.length > 0
+      ? [...customSortOrder]
+      : visibleRows.map((r) => r.rowId);
+
+    visibleRows.forEach((r) => {
+      if (!currentOrder.includes(r.rowId)) {
+        currentOrder.push(r.rowId);
+      }
+    });
+
+    const currentIndex = currentOrder.indexOf(rowId);
+    if (currentIndex === -1) return;
+
+    const targetIndex = direction === 'UP' ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= currentOrder.length) return;
+
+    const updated = [...currentOrder];
+    const temp = updated[currentIndex];
+    updated[currentIndex] = updated[targetIndex];
+    updated[targetIndex] = temp;
+
+    setCustomSortOrder(updated);
+    localStorage.setItem('zamzam_fast_custom_sort_order', JSON.stringify(updated));
+    setHasUnsavedCustomOrder(true);
+  };
+
+  // Set & Save Custom Order permanently and lock/hide edit options
+  const handleSaveCustomOrder = () => {
+    const currentOrder = visibleRows.map((r) => r.rowId);
+    setCustomSortOrder(currentOrder);
+    localStorage.setItem('zamzam_fast_custom_sort_order', JSON.stringify(currentOrder));
+    setHasUnsavedCustomOrder(false);
+    setSaveCustomOrderSuccess(true);
+    setIsCustomEditing(false); // Hides edit options and remove buttons on save
+    setSuccessBanner(`Custom shop order saved and locked successfully (${currentOrder.length} shops)! Edit options hidden.`);
+    setTimeout(() => {
+      setSaveCustomOrderSuccess(false);
+    }, 2500);
+  };
+
+  // Reset Custom Order back to Shop Registered (Oldest)
+  const handleResetToOldest = () => {
+    const resetOrder = [...visibleRows].sort((a, b) => {
+      const tA = new Date(a.customerCreatedAt || 0).getTime();
+      const tB = new Date(b.customerCreatedAt || 0).getTime();
+      if (tA !== 0 && tB !== 0 && tA !== tB) return tA - tB;
+      if (tA !== 0 && tB === 0) return -1;
+      if (tA === 0 && tB !== 0) return 1;
+      return a.customerName.localeCompare(b.customerName);
+    }).map((r) => r.rowId);
+    setCustomSortOrder(resetOrder);
+    localStorage.setItem('zamzam_fast_custom_sort_order', JSON.stringify(resetOrder));
+    setHasUnsavedCustomOrder(false);
+    setSuccessBanner('Reset custom order back to Shop Registered (Oldest).');
+  };
+
   // Add 1 Custom Row
   const handleAddCustomRow = () => {
     const newRow: OrderRow = {
@@ -1107,7 +1636,8 @@ export const CreateOrderPage: React.FC = () => {
     };
     setRows((prev) => [newRow, ...prev]);
     setTimeout(() => {
-      focusCell(0, 'kubbus');
+      const firstCol = products.length > 0 ? `prod_${products[0].id}` : 'kubbus';
+      focusCell(0, firstCol);
     }, 40);
   };
 
@@ -1119,6 +1649,7 @@ export const CreateOrderPage: React.FC = () => {
           ...r,
           kubbusQty: '',
           romaliQty: '',
+          productQuantities: {},
           cashAmount: '',
           gpayAmount: '',
           status: 'IDLE',
@@ -1136,24 +1667,31 @@ export const CreateOrderPage: React.FC = () => {
       setIsAutoLoading(true);
       setError(null);
       const allOrders = await orderService.getOrders({ all: 'true' });
-      const latestOrderMap: Record<string, { kubbusQty: number; romaliQty: number }> = {};
+      const latestOrderMap: Record<
+        string,
+        { productQuantities: Record<string, string>; kubbusQty: number; romaliQty: number }
+      > = {};
       
       const sorted = [...allOrders].sort((a, b) => new Date(b.order_date).getTime() - new Date(a.order_date).getTime());
       
       for (const ord of sorted) {
         if (!ord.customer || latestOrderMap[ord.customer]) continue;
+        const prodQtys: Record<string, string> = {};
         let kQty = 0;
         let rQty = 0;
         for (const it of ord.items || []) {
-          const pName = (it.product_details?.name || '').toLowerCase();
-          if (pName.includes('kubbus') || it.product === kubbusProduct?.id) {
-            kQty += it.quantity;
-          } else if (pName.includes('romali') || it.product === romaliProduct?.id) {
-            rQty += it.quantity;
+          if (it.quantity > 0) {
+            prodQtys[it.product] = String(it.quantity);
+            const pName = (it.product_details?.name || '').toLowerCase();
+            if (pName.includes('kubbus') || it.product === kubbusProduct?.id) {
+              kQty += it.quantity;
+            } else if (pName.includes('romali') || it.product === romaliProduct?.id) {
+              rQty += it.quantity;
+            }
           }
         }
-        if (kQty > 0 || rQty > 0) {
-          latestOrderMap[ord.customer] = { kubbusQty: kQty, romaliQty: rQty };
+        if (Object.keys(prodQtys).length > 0 || kQty > 0 || rQty > 0) {
+          latestOrderMap[ord.customer] = { productQuantities: prodQtys, kubbusQty: kQty, romaliQty: rQty };
         }
       }
 
@@ -1167,6 +1705,7 @@ export const CreateOrderPage: React.FC = () => {
               ...r,
               kubbusQty: match.kubbusQty > 0 ? String(match.kubbusQty) : r.kubbusQty,
               romaliQty: match.romaliQty > 0 ? String(match.romaliQty) : r.romaliQty,
+              productQuantities: { ...(r.productQuantities || {}), ...match.productQuantities },
               status: 'IDLE',
             };
           }
@@ -1186,24 +1725,39 @@ export const CreateOrderPage: React.FC = () => {
 
   // Quick Bulk Fill Custom Fixed Quantities
   const handleQuickBulkApply = () => {
-    const kVal = autoKubbusQty.trim();
-    const rVal = autoRomaliQty.trim();
     const visibleRowIds = new Set(visibleRows.map((r) => r.rowId));
 
     let updatedCount = 0;
     setRows((prev) =>
       prev.map((r) => {
+        const hasExistingOrder =
+          Boolean(r.kubbusQty || r.romaliQty) ||
+          Object.values(r.productQuantities || {}).some((q) => Boolean(q && q !== '0'));
+
         const isTarget =
           autoTargetMode === 'all'
             ? true
             : autoTargetMode === 'visible'
             ? visibleRowIds.has(r.rowId)
-            : !r.kubbusQty && !r.romaliQty;
+            : !hasExistingOrder;
 
         if (isTarget && r.customerId) {
           updatedCount++;
+          const nextProdQtys = { ...(r.productQuantities || {}) };
+          products.forEach((p) => {
+            const v = (autoProductQtys[p.id] || '').trim();
+            if (v !== '') nextProdQtys[p.id] = v;
+          });
+          const kVal = kubbusProduct && autoProductQtys[kubbusProduct.id] !== undefined
+            ? autoProductQtys[kubbusProduct.id]
+            : autoKubbusQty.trim();
+          const rVal = romaliProduct && autoProductQtys[romaliProduct.id] !== undefined
+            ? autoProductQtys[romaliProduct.id]
+            : autoRomaliQty.trim();
+
           return {
             ...r,
+            productQuantities: nextProdQtys,
             kubbusQty: kVal !== '' ? kVal : r.kubbusQty,
             romaliQty: rVal !== '' ? rVal : r.romaliQty,
             status: 'IDLE',
@@ -1294,20 +1848,28 @@ export const CreateOrderPage: React.FC = () => {
         const assignedDriverId = row.driverId || routeDriver?.id || null;
 
         const items: Array<{ product_id: string; quantity: number; unit_price: string }> = [];
-        if (fin.kQty > 0 && kubbusProduct) {
-          items.push({
-            product_id: kubbusProduct.id,
-            quantity: fin.kQty,
-            unit_price: fin.kPrice.toFixed(2),
-          });
-        }
-        if (fin.rQty > 0 && romaliProduct) {
-          items.push({
-            product_id: romaliProduct.id,
-            quantity: fin.rQty,
-            unit_price: fin.rPrice.toFixed(2),
-          });
-        }
+        const activeProducts = products.length > 0 ? products : [
+          ...(kubbusProduct ? [kubbusProduct] : []),
+          ...(romaliProduct ? [romaliProduct] : [])
+        ];
+
+        activeProducts.forEach((prod) => {
+          let qStr = row.productQuantities?.[prod.id];
+          if (qStr === undefined) {
+            if (kubbusProduct && prod.id === kubbusProduct.id) qStr = row.kubbusQty;
+            else if (romaliProduct && prod.id === romaliProduct.id) qStr = row.romaliQty;
+            else qStr = '';
+          }
+          const qty = parseInt(qStr || '0', 10) || 0;
+          if (qty > 0) {
+            const price = getProductPriceForCustomer(row.customerId, prod);
+            items.push({
+              product_id: prod.id,
+              quantity: qty,
+              unit_price: price.toFixed(2),
+            });
+          }
+        });
 
         let order: Order | undefined;
 
@@ -1324,6 +1886,7 @@ export const CreateOrderPage: React.FC = () => {
               customer_id: row.customerId,
               driver_id: assignedDriverId,
               order_date: orderDate,
+              order_number: row.orderNumber?.trim() || undefined,
               items,
               notes: 'Fast wholesale daily entry',
             });
@@ -1362,6 +1925,8 @@ export const CreateOrderPage: React.FC = () => {
                   orderNumber: order?.order_number || r.orderNumber,
                   driverId: order?.driver || assignedDriverId || r.driverId || undefined,
                   driverName: order?.driver_name || routeDriver?.driver_name || r.driverName || undefined,
+                  createdAt: order?.created_at || r.createdAt,
+                  submittedAt: order?.submitted_at || r.submittedAt,
                 }
               : r
           )
@@ -1427,7 +1992,7 @@ export const CreateOrderPage: React.FC = () => {
     }
   };
 
-  // Direct Customer Creation Handler
+  // Direct Customer Creation Handler with Dynamic Product Rates & Initial Order
   const handleCreateCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCustName || !newCustPhone || !newCustAddress || !newCustRoute) {
@@ -1439,28 +2004,43 @@ export const CreateOrderPage: React.FC = () => {
       setNewCustSubmitting(true);
       setNewCustError(null);
 
-      const product_prices = [];
-      if (kubbusProduct && newCustKubbusPrice) {
-        product_prices.push({ product_id: kubbusProduct.id, price: newCustKubbusPrice });
-      }
-      if (romaliProduct && newCustRomaliPrice) {
-        product_prices.push({ product_id: romaliProduct.id, price: newCustRomaliPrice });
-      }
+      const product_prices: Array<{ product_id: string; price: string }> = [];
+      const initialProductQuantities: Record<string, string> = {};
+
+      products.forEach((prod) => {
+        const customPrice = newCustProductPrices[prod.id] || prod.unit_price;
+        if (customPrice && String(customPrice).trim()) {
+          product_prices.push({ product_id: prod.id, price: String(customPrice).trim() });
+        }
+        const initialQty = newCustProductQuantities[prod.id];
+        if (initialQty && String(initialQty).trim()) {
+          initialProductQuantities[prod.id] = String(initialQty).trim();
+        }
+      });
+
+      const parsedListOrder = newCustListOrder.trim() ? parseInt(newCustListOrder.trim(), 10) : undefined;
 
       const created = await customerService.createCustomer({
-        name: newCustName,
-        owner_name: newCustOwner || undefined,
-        phone: newCustPhone,
-        address: newCustAddress,
+        name: newCustName.trim(),
+        owner_name: newCustOwner.trim() || undefined,
+        phone: newCustPhone.trim(),
+        address: newCustAddress.trim(),
         route: newCustRoute,
+        notes: parsedListOrder ? `[Stop #${parsedListOrder}]` : undefined,
         product_prices: product_prices.length > 0 ? product_prices : undefined,
       });
 
       setCustomers((prev) => [created, ...prev]);
 
-      const kP = parseFloat(newCustKubbusPrice) || defaultKubbusPrice;
-      const rP = parseFloat(newCustRomaliPrice) || defaultRomaliPrice;
-      setPricingCache((prev) => ({ ...prev, [created.id]: { kubbusPrice: kP, romaliPrice: rP } }));
+      // Cache custom wholesale prices for all products
+      const priceMap: Record<string, number> & { kubbusPrice?: number; romaliPrice?: number } = {};
+      products.forEach((prod) => {
+        const pr = parseFloat(newCustProductPrices[prod.id] || prod.unit_price || '0');
+        priceMap[prod.id] = pr;
+        if (kubbusProduct && prod.id === kubbusProduct.id) priceMap.kubbusPrice = pr;
+        if (romaliProduct && prod.id === romaliProduct.id) priceMap.romaliPrice = pr;
+      });
+      setPricingCache((prev) => ({ ...prev, [created.id]: priceMap }));
 
       const createdRouteId = created.route || created.route_details?.id || '';
       const createdRouteName = created.route_details?.name || routes.find((r) => r.id === createdRouteId)?.name || '';
@@ -1478,6 +2058,9 @@ export const CreateOrderPage: React.FC = () => {
           ? `${routeDriver.user_details.first_name} ${routeDriver.user_details.last_name || ''}`
           : routeDriver?.driver_name;
 
+      const kQty = kubbusProduct ? (initialProductQuantities[kubbusProduct.id] || '') : '';
+      const rQty = romaliProduct ? (initialProductQuantities[romaliProduct.id] || '') : '';
+
       const newShopRow: OrderRow = {
         rowId: `shop_${created.id}`,
         customerId: created.id,
@@ -1488,23 +2071,57 @@ export const CreateOrderPage: React.FC = () => {
         customerBalance: created.current_balance,
         driverId: routeDriver?.id,
         driverName: driverDisplay,
-        kubbusQty: '',
-        romaliQty: '',
+        kubbusQty: kQty,
+        romaliQty: rQty,
+        productQuantities: initialProductQuantities,
         cashAmount: '',
         gpayAmount: '',
         status: 'IDLE',
+        orderNumber: newCustOrderNumber.trim() || undefined,
+        listOrder: parsedListOrder,
+        customerCreatedAt: created.created_at || new Date().toISOString(),
       };
 
-      setRows((prev) => [newShopRow, ...prev]);
+      setRows((prev) => {
+        if (parsedListOrder !== undefined && parsedListOrder > 0) {
+          const insertIndex = Math.min(parsedListOrder - 1, prev.length);
+          const copy = [...prev];
+          copy.splice(insertIndex, 0, newShopRow);
+          return copy;
+        }
+        return [newShopRow, ...prev];
+      });
+
+      // Save draft immediately if initial quantities were specified
+      if (Object.values(initialProductQuantities).some((q) => parseInt(q, 10) > 0)) {
+        draftOrderStorage.saveDraft({
+          customerId: created.id,
+          orderDate,
+          kubbusQty: kQty,
+          romaliQty: rQty,
+          productQuantities: initialProductQuantities,
+          cashAmount: '',
+          gpayAmount: '',
+          updatedAt: Date.now(),
+        });
+      }
 
       setIsNewCustModalOpen(false);
       setNewCustName('');
       setNewCustOwner('');
       setNewCustPhone('');
       setNewCustAddress('');
+      setNewCustListOrder('');
+      setNewCustOrderNumber('');
+      setNewCustProductPrices({});
+      setNewCustProductQuantities({});
 
+      setSuccessBanner(`Shop "${created.name}" created with custom product prices and added to order sheet!`);
+      setTimeout(() => setSuccessBanner(null), 4000);
+
+      const targetCol = products.length > 0 ? `prod_${products[0].id}` : 'kubbus';
       setTimeout(() => {
-        focusCell(0, 'kubbus');
+        focusCell(0, targetCol);
       }, 50);
     } catch (err: unknown) {
       setNewCustError(err instanceof Error ? err.message : 'Failed to create customer');
@@ -1521,49 +2138,49 @@ export const CreateOrderPage: React.FC = () => {
         flexDirection: 'column',
       }}
     >
-      {/* 1. Page Header (Single-line compact) */}
+      {/* 1. Page Header (Ultra-compact single-line) */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          marginBottom: '0.65rem',
+          marginBottom: '0.15rem',
           flexShrink: 0,
-          gap: '0.75rem',
+          gap: '0.35rem',
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.75rem' }}>
-          <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <h2 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0, lineHeight: 1.15 }}>
             Fast Wholesale Order Entry
           </h2>
-          <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-            Enter: Kubbus &rarr; Romali Roti &rarr; Next Shop
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem', whiteSpace: 'nowrap' }}>
+            {products.length > 0 ? products.map((p) => p.name).join(' → ') : 'Products'} → Next Shop
           </span>
           {ordersLoading && (
-            <span style={{ fontSize: '0.75rem', color: 'var(--primary)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-              <div className="spinner" style={{ width: 12, height: 12 }} />
-              Loading database orders...
+            <span style={{ fontSize: '0.68rem', color: 'var(--primary)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+              <div className="spinner" style={{ width: 10, height: 10 }} />
+              Loading...
             </span>
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
           {/* Driver Confirmation Toggle */}
           <label
             style={{
               display: 'inline-flex',
               alignItems: 'center',
-              gap: '0.4rem',
+              gap: '0.3rem',
               cursor: 'pointer',
-              fontSize: '0.8rem',
+              fontSize: '0.76rem',
               fontWeight: 700,
               color: autoConfirmDriver ? '#dc2626' : 'var(--text-secondary)',
               background: autoConfirmDriver ? '#fee2e2' : 'var(--bg-card)',
               border: autoConfirmDriver ? '1.5px solid #dc2626' : '1px solid var(--border)',
-              padding: '0 0.65rem',
-              borderRadius: '8px',
-              height: '34px',
+              padding: '0 0.5rem',
+              borderRadius: '6px',
+              height: '28px',
               userSelect: 'none',
               transition: 'all 0.15s ease',
             }}
@@ -1573,9 +2190,9 @@ export const CreateOrderPage: React.FC = () => {
               type="checkbox"
               checked={autoConfirmDriver}
               onChange={(e) => setAutoConfirmDriver(e.target.checked)}
-              style={{ accentColor: '#dc2626', width: '15px', height: '15px', cursor: 'pointer' }}
+              style={{ accentColor: '#dc2626', width: '13px', height: '13px', cursor: 'pointer' }}
             />
-            <Truck size={15} color={autoConfirmDriver ? '#dc2626' : 'var(--text-muted)'} />
+            <Truck size={13} color={autoConfirmDriver ? '#dc2626' : 'var(--text-muted)'} />
             <span>Confirm to Driver</span>
           </label>
 
@@ -1584,29 +2201,30 @@ export const CreateOrderPage: React.FC = () => {
             className="btn btn-secondary btn-sm"
             onClick={() => setIsAutoEntryModalOpen(true)}
             style={{
-              height: '34px',
-              padding: '0 0.75rem',
+              height: '28px',
+              padding: '0 0.55rem',
               fontWeight: 700,
+              fontSize: '0.76rem',
               background: '#fef3c7',
               color: '#b45309',
               borderColor: '#fde68a',
               display: 'inline-flex',
               alignItems: 'center',
-              gap: '0.35rem',
+              gap: '0.25rem',
             }}
             title="Auto-fill order quantities from yesterday's orders or bulk presets"
           >
-            <Zap size={15} color="#d97706" />
+            <Zap size={13} color="#d97706" />
             <span>Auto Entry</span>
           </button>
 
           <button
             type="button"
             className="btn btn-secondary btn-sm"
-            onClick={() => setIsNewCustModalOpen(true)}
-            style={{ height: '34px', padding: '0 0.75rem' }}
+            onClick={handleOpenNewCustomerModal}
+            style={{ height: '28px', padding: '0 0.55rem', fontSize: '0.76rem' }}
           >
-            <UserPlus size={15} />
+            <UserPlus size={13} />
             <span>New Shop</span>
           </button>
 
@@ -1616,19 +2234,20 @@ export const CreateOrderPage: React.FC = () => {
               className="btn btn-secondary btn-sm"
               onClick={() => setIsOpenDayModalOpen(true)}
               style={{
-                height: '34px',
-                padding: '0 0.75rem',
+                height: '28px',
+                padding: '0 0.55rem',
                 fontWeight: 700,
+                fontSize: '0.76rem',
                 color: '#b45309',
                 borderColor: '#fcd34d',
                 background: '#fffbeb',
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: '0.4rem',
+                gap: '0.25rem',
               }}
               title="Record opening cash float for business day"
             >
-              <Sunrise size={15} />
+              <Sunrise size={13} />
               <span>Open Day</span>
             </button>
           )}
@@ -1638,9 +2257,9 @@ export const CreateOrderPage: React.FC = () => {
             className="btn btn-primary btn-sm"
             disabled={isSubmittingAll || pendingOrdersCount === 0}
             onClick={handleSubmitAllOrders}
-            style={{ height: '34px', padding: '0 1rem', fontWeight: 800 }}
+            style={{ height: '28px', padding: '0 0.75rem', fontWeight: 800, fontSize: '0.78rem' }}
           >
-            <Save size={15} />
+            <Save size={13} />
             <span>
               {isSubmittingAll
                 ? `Submitting (${submitProgress?.current}/${submitProgress?.total})...`
@@ -1654,73 +2273,115 @@ export const CreateOrderPage: React.FC = () => {
 
       {/* Notifications */}
       {error && (
-        <div className="alert alert-error" style={{ marginBottom: '0.5rem', padding: '0.4rem 0.75rem', fontSize: '0.82rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <AlertCircle size={16} />
+        <div className="alert alert-error" style={{ marginBottom: '0.2rem', padding: '0.25rem 0.55rem', fontSize: '0.78rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <AlertCircle size={14} />
           <span>{error}</span>
         </div>
       )}
 
       {successBanner && (
-        <div className="alert alert-success" style={{ marginBottom: '0.5rem', padding: '0.4rem 0.75rem', fontSize: '0.82rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <CheckCircle2 size={16} />
+        <div className="alert alert-success" style={{ marginBottom: '0.25rem', padding: '0.3rem 0.65rem', fontSize: '0.8rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+          <CheckCircle2 size={14} />
           <span>{successBanner}</span>
         </div>
       )}
 
-      {/* 2. Compact 4 KPI Cards */}
+      {/* 2. Dynamic Product KPI Cards Grid */}
       <div
         className="billing-stat-grid"
         style={{
-          gap: '0.65rem',
-          marginBottom: '0.65rem',
+          display: 'grid',
+          gridTemplateColumns: `repeat(auto-fit, minmax(155px, 1fr))`,
+          gap: '0.3rem',
+          marginBottom: '0.2rem',
           flexShrink: 0,
+          width: '100%',
         }}
       >
-        {/* Card 1: Red border stripe */}
-        <div className="card" style={{ padding: '0.5rem 0.85rem', borderLeft: '4px solid #dc2626' }}>
-          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
+        {/* Card 1: Orders summary */}
+        <div className="card" style={{ padding: '0.25rem 0.65rem', borderLeft: '3.5px solid #dc2626' }}>
+          <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
             Dispatch Orders ({orderDate})
           </span>
-          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#dc2626', marginTop: '0.1rem', lineHeight: 1.15 }}>
+          <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#dc2626', marginTop: '0.02rem', lineHeight: 1.15 }}>
             {sheetStats.validShopsCount} Shops
           </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+          <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)', marginTop: '0.02rem' }}>
             {formatCurrency(sheetStats.totalBill)} total bill
           </div>
         </div>
 
-        {/* Card 2: Amber border stripe */}
-        <div className="card" style={{ padding: '0.5rem 0.85rem', borderLeft: '4px solid #f59e0b' }}>
-          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
-            Total Kubbus
-          </span>
-          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#b45309', marginTop: '0.1rem', lineHeight: 1.15 }}>
-            {sheetStats.totalKubbus} <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>ps</span>
-          </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
-            Single pieces (ps)
-          </div>
-        </div>
+        {/* Dynamic Cards for EACH product (1, 2, 3, or more products) */}
+        {products.length > 0 ? (
+          products.map((p, idx) => {
+            const colors = ['#f59e0b', '#0284c7', '#7c3aed', '#059669', '#ea580c', '#e11d48'];
+            const cardColor = colors[idx % colors.length];
+            const qty =
+              sheetStats.productTotals[p.id] ||
+              (kubbusProduct && p.id === kubbusProduct.id
+                ? sheetStats.totalKubbus
+                : romaliProduct && p.id === romaliProduct.id
+                ? sheetStats.totalRomali
+                : 0);
 
-        {/* Card 3: Red border stripe */}
-        <div className="card" style={{ padding: '0.5rem 0.85rem', borderLeft: '4px solid #dc2626' }}>
-          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
-            Total Romali
-          </span>
-          <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#dc2626', marginTop: '0.1rem', lineHeight: 1.15 }}>
-            {sheetStats.totalRomali} <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>ps</span>
+            return (
+              <div key={p.id} className="card" style={{ padding: '0.25rem 0.65rem', borderLeft: `3.5px solid ${cardColor}` }}>
+                <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
+                  Total {p.name}
+                </span>
+                <div style={{ fontSize: '1.05rem', fontWeight: 800, color: cardColor, marginTop: '0.02rem', lineHeight: 1.15 }}>
+                  {qty} <span style={{ fontSize: '0.74rem', fontWeight: 600 }}>ps</span>
+                </div>
+                <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)', marginTop: '0.02rem' }}>
+                  {p.packet_size ? `${p.packet_size} • ` : ''}₹{parseFloat(p.unit_price).toFixed(2)}/ps
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <>
+            <div className="card" style={{ padding: '0.25rem 0.65rem', borderLeft: '3.5px solid #f59e0b' }}>
+              <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
+                Total Kubbus
+              </span>
+              <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#b45309', marginTop: '0.02rem', lineHeight: 1.15 }}>
+                {sheetStats.totalKubbus} <span style={{ fontSize: '0.74rem', fontWeight: 600 }}>ps</span>
+              </div>
+              <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)', marginTop: '0.02rem' }}>Single pieces (ps)</div>
+            </div>
+            <div className="card" style={{ padding: '0.25rem 0.65rem', borderLeft: '3.5px solid #dc2626' }}>
+              <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
+                Total Romali
+              </span>
+              <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#dc2626', marginTop: '0.02rem', lineHeight: 1.15 }}>
+                {sheetStats.totalRomali} <span style={{ fontSize: '0.74rem', fontWeight: 600 }}>ps</span>
+              </div>
+              <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)', marginTop: '0.02rem' }}>Wholesale pieces</div>
+            </div>
+          </>
+        )}
+
+        {/* If 3 or more products, also show Total Pieces summary card */}
+        {products.length >= 3 && (
+          <div className="card" style={{ padding: '0.25rem 0.65rem', borderLeft: '3.5px solid #6366f1' }}>
+            <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
+              Total All Pieces
+            </span>
+            <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#4f46e5', marginTop: '0.02rem', lineHeight: 1.15 }}>
+              {sheetStats.totalPieces} <span style={{ fontSize: '0.74rem', fontWeight: 600 }}>ps</span>
+            </div>
+            <div style={{ fontSize: '0.64rem', color: 'var(--text-muted)', marginTop: '0.02rem' }}>
+              Across {products.length} products
+            </div>
           </div>
-          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
-            Wholesale single pieces
-          </div>
-        </div>
+        )}
 
         {/* Card 4: Green border stripe */}
-        <div className="card" style={{ padding: '0.5rem 0.85rem', borderLeft: '4px solid #10b981' }}>
-          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
-            Collections & Balance
+        <div className="card" style={{ padding: '0.25rem 0.65rem', borderLeft: '3.5px solid #10b981' }}>
+          <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', display: 'block', letterSpacing: '0.03em' }}>
+            Collections &amp; Balance
           </span>
-          <div style={{ fontSize: '0.75rem', marginTop: '0.2rem', display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+          <div style={{ fontSize: '0.7rem', marginTop: '0.05rem', display: 'flex', flexDirection: 'column', gap: '0.05rem' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span>Collected:</span>
               <strong style={{ color: '#10b981' }}>{formatCurrency(sheetStats.totalCash + sheetStats.totalGPay)}</strong>
@@ -1733,24 +2394,29 @@ export const CreateOrderPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. Compact Filter Bar */}
+      {/* 3. Compact Filter Bar - Single stream without wasted vertical space */}
       <div
         className="billing-filter-bar"
         style={{
-          gap: '0.5rem',
-          marginBottom: '0.65rem',
+          display: 'flex',
+          gap: '0.25rem',
           alignItems: 'center',
+          flexWrap: 'nowrap',
+          overflowX: 'auto',
+          overflowY: 'hidden',
+          marginBottom: '0.2rem',
           flexShrink: 0,
+          scrollbarWidth: 'none',
         }}
       >
         {/* Route Select */}
         <select
           className="form-select"
-          style={{ minWidth: '180px', flex: '0 0 200px', height: '34px', padding: '0.25rem 0.65rem', fontSize: '0.84rem' }}
+          style={{ width: '130px', minWidth: '115px', flex: '0 0 auto', height: '28px', padding: '0 0.35rem', fontSize: '0.74rem' }}
           value={routeFilter}
           onChange={(e) => setRouteFilter(e.target.value)}
         >
-          <option value="ALL">All Routes ({customers.length} Shops)</option>
+          <option value="ALL">All Routes ({customers.length})</option>
           {routes.map((r) => {
             const count = customers.filter(
               (c) =>
@@ -1761,7 +2427,7 @@ export const CreateOrderPage: React.FC = () => {
             const displayName = r.name.charAt(0).toUpperCase() + r.name.slice(1);
             return (
               <option key={r.id} value={r.id}>
-                {displayName} ({count} Shops)
+                {displayName} ({count})
               </option>
             );
           })}
@@ -1771,54 +2437,185 @@ export const CreateOrderPage: React.FC = () => {
         <input
           type="date"
           className="form-input"
-          style={{ width: '145px', flex: '0 0 145px', height: '34px', padding: '0.25rem 0.65rem', fontSize: '0.84rem' }}
+          style={{ width: '112px', flex: '0 0 auto', height: '28px', padding: '0 0.35rem', fontSize: '0.74rem' }}
           value={orderDate}
           onChange={(e) => handleDateChange(e.target.value)}
           title="Select dispatch date to load or enter orders"
         />
 
-        {/* Live Real-Time Database Sync Badge */}
-        <span
-          className="badge"
+        {/* Order Sorting Dropdown - Small, side-by-side with Route and Date */}
+        <select
+          className="form-select"
+          style={{ width: '130px', minWidth: '115px', flex: '0 0 auto', height: '28px', padding: '0 0.35rem', fontSize: '0.74rem' }}
+          value={orderSort}
+          onClick={() => {
+            if (orderSort === 'CUSTOM' && !isCustomEditing) {
+              setIsCustomEditing(true);
+            }
+          }}
+          onChange={(e) => {
+            const nextSort = e.target.value as 'SHOP_CREATE_ASC' | 'CUSTOM';
+            if (nextSort === 'CUSTOM') {
+              if (customSortOrder.length === 0) {
+                // When custom is clicked, initialize custom order same as shop registered oldest
+                const oldestOrder = [...visibleRows].sort((a, b) => {
+                  const tA = new Date(a.customerCreatedAt || 0).getTime();
+                  const tB = new Date(b.customerCreatedAt || 0).getTime();
+                  if (tA !== 0 && tB !== 0 && tA !== tB) return tA - tB;
+                  if (tA !== 0 && tB === 0) return -1;
+                  if (tA === 0 && tB !== 0) return 1;
+                  return a.customerName.localeCompare(b.customerName);
+                }).map((r) => r.rowId);
+                setCustomSortOrder(oldestOrder);
+                localStorage.setItem('zamzam_fast_custom_sort_order', JSON.stringify(oldestOrder));
+              }
+              setIsCustomEditing(true); // When custom clicked, that time come!
+            } else {
+              setIsCustomEditing(false);
+            }
+            setOrderSort(nextSort);
+          }}
+          title="Sort order rows by shop registered date (oldest) or drag custom order"
+        >
+          <option value="SHOP_CREATE_ASC">Sort: Oldest</option>
+          <option value="CUSTOM">
+            {orderSort === 'CUSTOM' && !isCustomEditing
+              ? '✋ Custom Order'
+              : '✋ Custom (Drag)'}
+          </option>
+        </select>
+        {orderSort === 'CUSTOM' && isCustomEditing && (
+          <div style={{ display: 'inline-flex', gap: '0.25rem', alignItems: 'center', flexShrink: 0 }}>
+            <button
+              type="button"
+              onClick={handleSaveCustomOrder}
+              style={{
+                height: '28px',
+                padding: '0 0.5rem',
+                background: saveCustomOrderSuccess ? '#16a34a' : '#15803d',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 'var(--radius)',
+                fontSize: '0.74rem',
+                fontWeight: 800,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.2rem',
+                whiteSpace: 'nowrap',
+                boxShadow: '0 1px 3px rgba(21, 128, 61, 0.4)',
+              }}
+              title="Save custom order and hide all edit & remove options"
+            >
+              <Save size={12} />
+              <span>{saveCustomOrderSuccess ? '✓ Saved' : '💾 Save'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleResetToOldest}
+              style={{
+                height: '28px',
+                padding: '0 0.35rem',
+                background: '#f8fafc',
+                color: '#475569',
+                border: '1px solid #cbd5e1',
+                borderRadius: 'var(--radius)',
+                fontSize: '0.74rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.2rem',
+                whiteSpace: 'nowrap',
+              }}
+              title="Reset order back to Shop Registered (Oldest)"
+            >
+              🔄 Reset
+            </button>
+          </div>
+        )}
+
+        {/* Action filter buttons */}
+        <button
+          type="button"
+          onClick={() => setShowOrdersOnly((prev) => !prev)}
           style={{
-            height: '34px',
-            padding: '0 0.65rem',
+            height: '28px',
+            padding: '0 0.5rem',
             display: 'inline-flex',
             alignItems: 'center',
-            gap: '0.4rem',
-            background: '#ecfdf5',
-            color: '#065f46',
-            border: '1px solid #a7f3d0',
-            fontSize: '0.78rem',
-            fontWeight: 600,
+            gap: '0.25rem',
+            fontWeight: 700,
+            fontSize: '0.74rem',
+            borderRadius: 'var(--radius)',
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            flex: '0 0 auto',
+            background: showOrdersOnly ? '#1e40af' : '#f8fafc',
+            color: showOrdersOnly ? '#fff' : '#64748b',
+            border: showOrdersOnly ? '1.5px solid #1e40af' : '1px solid #e2e8f0',
+            transition: 'all 0.15s ease',
           }}
-          title="Live database sync is active: automatically polls every 20s and upon window focus"
+          title={showOrdersOnly ? 'Showing only shops with orders — click to show all shops' : 'Click to show only shops with orders placed today'}
         >
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              backgroundColor: '#10b981',
-              display: 'inline-block',
-              boxShadow: '0 0 0 2px rgba(16, 185, 129, 0.3)',
-            }}
-          />
-          <span>Live Sync</span>
-        </span>
+          <span>📋</span>
+          <span>{showOrdersOnly ? 'Orders Only ✓' : 'Orders Only'}</span>
+        </button>
 
-        {/* Refresh Orders Button */}
+        {/* Refresh Orders Button with Last Updated indicator */}
         <button
           type="button"
           className="btn btn-secondary btn-sm"
-          onClick={() => loadOrdersForDate(orderDate, customers, drivers)}
-          disabled={ordersLoading}
-          style={{ height: '34px', padding: '0 0.65rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
-          title="Refresh orders from database to see newly submitted Customer Self-Orders"
+          onClick={() => loadOrdersForDate(orderDate, customers, drivers, false)}
+          disabled={ordersLoading || isSyncing}
+          style={{ height: '28px', padding: '0 0.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.74rem', flex: '0 0 auto' }}
+          title={`Click to refresh orders. Last refreshed: ${lastUpdatedTime}`}
         >
-          <RefreshCw size={14} className={ordersLoading ? 'spinner' : ''} />
+          <RefreshCw size={12} className={ordersLoading || isSyncing ? 'spinner' : ''} />
           <span>Refresh</span>
+          <span style={{ fontSize: '0.68rem', opacity: 0.7, fontWeight: 'normal' }}>({lastUpdatedTime})</span>
         </button>
+
+        {/* User-Controlled Auto-Sync Toggle (Defaults to OFF to prevent table reloading while typing) */}
+        <label
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.3rem',
+            fontSize: '0.74rem',
+            cursor: 'pointer',
+            userSelect: 'none',
+            color: autoSyncEnabled ? '#065f46' : '#64748b',
+            fontWeight: 600,
+            background: autoSyncEnabled ? '#ecfdf5' : '#f8fafc',
+            border: autoSyncEnabled ? '1px solid #a7f3d0' : '1px solid #e2e8f0',
+            borderRadius: '4px',
+            padding: '0 0.45rem',
+            height: '28px',
+            flex: '0 0 auto',
+          }}
+          title="Auto-Sync is disabled by default to keep the order entry table completely stable without auto-reloading. Check to enable background sync every 60s."
+        >
+          <input
+            type="checkbox"
+            checked={autoSyncEnabled}
+            onChange={(e) => setAutoSyncEnabled(e.target.checked)}
+            style={{ cursor: 'pointer', accentColor: '#059669', width: '12px', height: '12px' }}
+          />
+          <span>Auto-Sync</span>
+          {autoSyncEnabled && (
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                backgroundColor: isSyncing ? '#059669' : '#10b981',
+                display: 'inline-block',
+                boxShadow: isSyncing ? '0 0 0 2px rgba(16, 185, 129, 0.45)' : 'none',
+              }}
+            />
+          )}
+        </label>
 
         {/* Customer Self-Orders Quick Filter Pill */}
         <button
@@ -1831,11 +2628,11 @@ export const CreateOrderPage: React.FC = () => {
           style={{
             display: 'inline-flex',
             alignItems: 'center',
-            gap: '0.4rem',
-            height: '34px',
-            padding: '0 0.8rem',
+            gap: '0.25rem',
+            height: '28px',
+            padding: '0 0.45rem',
             borderRadius: 'var(--radius)',
-            fontSize: '0.82rem',
+            fontSize: '0.74rem',
             fontWeight: 800,
             cursor: selfOrdersCount > 0 || sourceFilter === 'CUSTOMER_LINK' ? 'pointer' : 'default',
             background: sourceFilter === 'CUSTOMER_LINK' ? '#059669' : selfOrdersCount > 0 ? '#ecfdf5' : '#f8fafc',
@@ -1843,16 +2640,17 @@ export const CreateOrderPage: React.FC = () => {
             border: sourceFilter === 'CUSTOMER_LINK' ? '1.5px solid #059669' : selfOrdersCount > 0 ? '1.5px solid #10b981' : '1px solid #cbd5e1',
             boxShadow: sourceFilter === 'CUSTOMER_LINK' ? '0 2px 8px rgba(16, 185, 129, 0.35)' : '0 1px 3px rgba(0,0,0,0.05)',
             whiteSpace: 'nowrap',
+            flex: '0 0 auto',
             transition: 'all 0.15s ease',
           }}
           title={selfOrdersCount > 0 ? "Click to filter table to Customer Self-Orders placed online" : "No self-orders placed online yet for this date"}
         >
-          <Smartphone size={15} color={sourceFilter === 'CUSTOMER_LINK' ? '#ffffff' : selfOrdersCount > 0 ? '#059669' : '#94a3b8'} />
+          <Smartphone size={12} color={sourceFilter === 'CUSTOMER_LINK' ? '#ffffff' : selfOrdersCount > 0 ? '#059669' : '#94a3b8'} />
           <span>{selfOrdersCount} Self-Order{selfOrdersCount === 1 ? '' : 's'}</span>
           {sourceFilter === 'CUSTOMER_LINK' ? (
-            <X size={13} />
+            <X size={12} />
           ) : selfOrdersCount > 0 ? (
-            <span style={{ fontSize: '0.7rem', opacity: 0.85, background: '#10b981', color: '#fff', padding: '0.1rem 0.35rem', borderRadius: '3px' }}>Filter</span>
+            <span style={{ fontSize: '0.66rem', opacity: 0.85, background: '#10b981', color: '#fff', padding: '0.05rem 0.25rem', borderRadius: '3px' }}>Filter</span>
           ) : null}
         </button>
 
@@ -1865,14 +2663,15 @@ export const CreateOrderPage: React.FC = () => {
             style={{
               display: 'inline-flex',
               alignItems: 'center',
-              gap: '0.35rem',
-              padding: '0 0.65rem',
-              height: '34px',
+              gap: '0.25rem',
+              padding: '0 0.45rem',
+              height: '28px',
               borderRadius: 'var(--radius)',
-              fontSize: '0.78rem',
+              fontSize: '0.74rem',
               fontWeight: 700,
               cursor: 'pointer',
               whiteSpace: 'nowrap',
+              flex: '0 0 auto',
               background: dayStatus.is_closed ? '#fef2f2' : dayStatus.is_opened ? '#f0fdf4' : '#fffbeb',
               color: dayStatus.is_closed ? '#b91c1c' : dayStatus.is_opened ? '#166534' : '#b45309',
               border: `1px solid ${dayStatus.is_closed ? '#fca5a5' : dayStatus.is_opened ? '#86efac' : '#fcd34d'}`,
@@ -1889,12 +2688,12 @@ export const CreateOrderPage: React.FC = () => {
         )}
 
         {/* Customer/Shop Search Input with Connected WhatsApp Dropdown List */}
-        <div ref={searchContainerRef} style={{ position: 'relative', flex: '1 1 240px', minWidth: '220px' }}>
+        <div ref={searchContainerRef} style={{ position: 'relative', flex: '1 1 180px', minWidth: '160px' }}>
           <Search
-            size={14}
+            size={13}
             style={{
               position: 'absolute',
-              left: '10px',
+              left: '8px',
               top: '50%',
               transform: 'translateY(-50%)',
               color: 'var(--text-muted)',
@@ -1905,7 +2704,7 @@ export const CreateOrderPage: React.FC = () => {
           <input
             type="text"
             className="form-input"
-            style={{ paddingLeft: '30px', height: '34px', paddingRight: '28px', fontSize: '0.84rem', width: '100%' }}
+            style={{ paddingLeft: '26px', height: '28px', paddingRight: '24px', fontSize: '0.78rem', width: '100%' }}
             placeholder="Search by shop name, customer, or phone..."
             value={searchQuery}
             onChange={(e) => {
@@ -2069,7 +2868,7 @@ export const CreateOrderPage: React.FC = () => {
               setRouteFilter('ALL');
               setSearchQuery('');
             }}
-            style={{ height: '34px', padding: '0 0.65rem', fontSize: '0.8rem' }}
+            style={{ height: '28px', padding: '0 0.55rem', fontSize: '0.76rem' }}
           >
             Clear Filters
           </button>
@@ -2082,103 +2881,50 @@ export const CreateOrderPage: React.FC = () => {
             className="billing-whatsapp-mobile-trigger btn btn-sm"
             onClick={() => setMobileWhatsAppOpen(true)}
             style={{
-              height: '34px',
-              padding: '0 0.65rem',
+              height: '28px',
+              padding: '0 0.55rem',
               background: '#ecfdf5',
               border: '1.5px solid #10b981',
               color: '#047857',
               fontWeight: 700,
-              fontSize: '0.8rem',
+              fontSize: '0.78rem',
               borderRadius: 'var(--radius)',
               cursor: 'pointer',
             }}
             title="Open WhatsApp Customer Chat"
           >
-            <MessageCircle size={15} color="#059669" />
+            <MessageCircle size={13} color="#059669" />
             <span>WhatsApp{activeCustomer ? ` (${activeCustomer.name.slice(0, 10)})` : ''}</span>
           </button>
         )}
       </div>
 
-      {/* Day Status Action Alert Banner */}
-      {dayStatus && !dayStatus.is_opened && !dayStatus.is_closed && (
-        <div
-          style={{
-            padding: '0.5rem 0.85rem',
-            background: '#fffbeb',
-            border: '1.5px solid #fcd34d',
-            borderRadius: 'var(--radius)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: '0.5rem',
-            flexShrink: 0,
-            gap: '1rem',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', color: '#92400e' }}>
-            <Sun size={20} color="#b45309" />
-            <div>
-              <span style={{ fontSize: '0.86rem', fontWeight: 800 }}>
-                Business Day ({orderDate}) is Not Yet Opened
-              </span>
-              <span style={{ fontSize: '0.78rem', color: '#b45309', display: 'block' }}>
-                You can enter and save wholesale orders directly. Click Open Day to record your morning cash float.
-              </span>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            onClick={() => setIsOpenDayModalOpen(true)}
-            style={{
-              background: '#b45309',
-              borderColor: '#b45309',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.4rem',
-              height: '32px',
-              fontSize: '0.82rem',
-              fontWeight: 800,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            <Sunrise size={15} />
-            <span>Open Day Cash Float</span>
-          </button>
-        </div>
-      )}
-
       {dayStatus?.is_closed && (
         <div
           style={{
-            padding: '0.5rem 0.85rem',
+            padding: '0.2rem 0.65rem',
             background: '#fef2f2',
-            border: '1.5px solid #fca5a5',
+            border: '1px solid #fca5a5',
             borderRadius: 'var(--radius)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            marginBottom: '0.5rem',
+            marginBottom: '0.25rem',
             flexShrink: 0,
+            gap: '0.5rem',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', color: '#991b1b' }}>
-            <Lock size={20} color="#dc2626" />
-            <div>
-              <span style={{ fontSize: '0.86rem', fontWeight: 800 }}>
-                Business Day ({orderDate}) is CLOSED.
-              </span>
-              <span style={{ fontSize: '0.78rem', color: '#b91c1c', display: 'block' }}>
-                Financial records for this day are locked and cannot be edited. Only the Owner can reopen.
-              </span>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#991b1b' }}>
+            <Lock size={13} color="#dc2626" />
+            <span style={{ fontSize: '0.78rem', fontWeight: 700 }}>
+              Business Day ({orderDate}) is CLOSED (Records locked)
+            </span>
           </div>
           <button
             type="button"
             className="btn btn-secondary btn-sm"
             onClick={() => navigate('/manager/daily-closing')}
-            style={{ height: '32px', fontSize: '0.82rem', whiteSpace: 'nowrap' }}
+            style={{ height: '24px', padding: '0 0.55rem', fontSize: '0.74rem', whiteSpace: 'nowrap' }}
           >
             View Daily Closing
           </button>
@@ -2468,24 +3214,41 @@ export const CreateOrderPage: React.FC = () => {
           <table className="data-table" style={{ width: '100%', minWidth: '950px', borderCollapse: 'collapse' }}>
             <thead style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-card)' }}>
               <tr>
-                <th style={{ width: '38px', minWidth: '38px', textAlign: 'center', padding: '0.5rem 0.35rem' }}>#</th>
-                <th style={{ minWidth: '180px', maxWidth: '240px', padding: '0.5rem 0.65rem' }}>Shop Name</th>
-                <th style={{ minWidth: '120px', padding: '0.5rem 0.65rem' }}>Route & Driver</th>
-                <th style={{ minWidth: '85px', textAlign: 'right', padding: '0.5rem 0.65rem', whiteSpace: 'nowrap' }}>Prev. Due</th>
-                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.5rem 0.45rem', whiteSpace: 'nowrap' }}>Kubbus (ps)</th>
-                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.5rem 0.45rem', whiteSpace: 'nowrap' }}>Romali (ps)</th>
-                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.5rem 0.45rem', whiteSpace: 'nowrap' }}>Cash (₹)</th>
-                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.5rem 0.45rem', whiteSpace: 'nowrap' }}>GPay (₹)</th>
-                <th style={{ minWidth: '90px', textAlign: 'right', padding: '0.5rem 0.65rem', whiteSpace: 'nowrap' }}>Bill Total</th>
-                <th style={{ minWidth: '95px', textAlign: 'right', padding: '0.5rem 0.65rem', whiteSpace: 'nowrap' }} title="Total Balance = Prev. Due + Today's Bill - Today's Payments">Balance</th>
-                <th style={{ width: '90px', minWidth: '85px', textAlign: 'center', padding: '0.5rem 0.45rem' }}>Status</th>
-                <th style={{ width: '44px', minWidth: '40px', textAlign: 'center', padding: '0.5rem 0.35rem' }}>Action</th>
+                {orderSort === 'CUSTOM' && isCustomEditing && (
+                  <th style={{ width: '42px', minWidth: '42px', padding: '0.35rem 0.2rem', textAlign: 'center' }} title="Drag or click ▲/▼ to reorder shops">Order</th>
+                )}
+                <th style={{ width: '38px', minWidth: '36px', textAlign: 'center', padding: '0.35rem 0.25rem' }}>#</th>
+                <th style={{ minWidth: '180px', maxWidth: '240px', padding: '0.35rem 0.55rem' }}>Shop Name</th>
+                <th style={{ minWidth: '110px', padding: '0.35rem 0.55rem' }}>Route & Driver</th>
+                <th style={{ minWidth: '80px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }}>Prev. Due</th>
+                {products.length > 0 ? (
+                  products.map((p) => (
+                    <th
+                      key={p.id}
+                      style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}
+                      title={`${p.name} (Unit price: ₹${parseFloat(p.unit_price).toFixed(2)})`}
+                    >
+                      {p.name} ({p.packet_size ? p.packet_size : 'ps'})
+                    </th>
+                  ))
+                ) : (
+                  <>
+                    <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>Kubbus (ps)</th>
+                    <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>Romali (ps)</th>
+                  </>
+                )}
+                <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>Cash (₹)</th>
+                <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>GPay (₹)</th>
+                <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }}>Bill Total</th>
+                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }} title="Total Balance = Prev. Due + Today's Bill - Today's Payments">Balance</th>
+                <th style={{ width: '82px', minWidth: '78px', textAlign: 'center', padding: '0.35rem 0.4rem' }}>Status</th>
+                <th style={{ width: '40px', minWidth: '36px', textAlign: 'center', padding: '0.35rem 0.25rem' }}>Action</th>
               </tr>
             </thead>
             <tbody>
-              {loading || ordersLoading ? (
+              {loading || (ordersLoading && rows.length === 0) ? (
                 <tr>
-                  <td colSpan={12} style={{ padding: '3rem', textAlign: 'center' }}>
+                  <td colSpan={(orderSort === 'CUSTOM' && isCustomEditing ? 10 : 9) + (products.length > 0 ? products.length : 2)} style={{ padding: '3rem', textAlign: 'center' }}>
                     <div className="spinner" style={{ margin: '0 auto 0.5rem' }} />
                     <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                       Loading orders for {orderDate}...
@@ -2494,7 +3257,7 @@ export const CreateOrderPage: React.FC = () => {
                 </tr>
               ) : visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={12} style={{ padding: '3rem 1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <td colSpan={(orderSort === 'CUSTOM' && isCustomEditing ? 10 : 9) + (products.length > 0 ? products.length : 2)} style={{ padding: '3rem 1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
                     <div style={{ maxWidth: '420px', margin: '0 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.65rem' }}>
                       <Store size={40} color="var(--primary)" style={{ opacity: 0.8 }} />
                       <div style={{ fontWeight: 800, fontSize: '1.05rem', color: 'var(--text-primary)' }}>
@@ -2509,7 +3272,7 @@ export const CreateOrderPage: React.FC = () => {
                         <button
                           type="button"
                           className="btn btn-primary btn-sm"
-                          onClick={() => setIsNewCustModalOpen(true)}
+                          onClick={handleOpenNewCustomerModal}
                           style={{ marginTop: '0.4rem', padding: '0.45rem 1.25rem', fontWeight: 700 }}
                         >
                           <UserPlus size={16} />
@@ -2523,17 +3286,68 @@ export const CreateOrderPage: React.FC = () => {
                 visibleRows.map((row, index) => {
                   const fin = getRowFinancials(row);
                   const isRowActive = fin.hasOrder || fin.cash > 0 || fin.gpay > 0;
+                  const isDraggedOver = dragOver === row.rowId;
+                  const isBeingDragged = isDragging === row.rowId;
 
                   return (
                     <tr
                       key={row.rowId}
+                      draggable={orderSort === 'CUSTOM' && isCustomEditing}
+                      onDragStart={orderSort === 'CUSTOM' && isCustomEditing ? (e) => {
+                        dragRowId.current = row.rowId;
+                        setIsDragging(row.rowId);
+                        e.dataTransfer.effectAllowed = 'move';
+                      } : undefined}
+                      onDragOver={orderSort === 'CUSTOM' && isCustomEditing ? (e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (dragRowId.current !== row.rowId) {
+                          dragOverRowId.current = row.rowId;
+                          setDragOver(row.rowId);
+                        }
+                      } : undefined}
+                      onDragEnd={orderSort === 'CUSTOM' && isCustomEditing ? () => {
+                        if (dragRowId.current && dragOverRowId.current && dragRowId.current !== dragOverRowId.current) {
+                          setCustomSortOrder((prev) => {
+                            const currentOrder = prev.length > 0 ? prev : visibleRows.map((r) => r.rowId);
+                            const fromIdx = currentOrder.indexOf(dragRowId.current!);
+                            const toIdx = currentOrder.indexOf(dragOverRowId.current!);
+                            if (fromIdx === -1 || toIdx === -1) {
+                              // Build fresh from visible rows
+                              const fresh = visibleRows.map((r) => r.rowId);
+                              const fi = fresh.indexOf(dragRowId.current!);
+                              const ti = fresh.indexOf(dragOverRowId.current!);
+                              if (fi !== -1 && ti !== -1) {
+                                fresh.splice(fi, 1);
+                                fresh.splice(ti, 0, dragRowId.current!);
+                              }
+                              localStorage.setItem('zamzam_fast_custom_sort_order', JSON.stringify(fresh));
+                              return fresh;
+                            }
+                            const updated = [...currentOrder];
+                            updated.splice(fromIdx, 1);
+                            updated.splice(toIdx, 0, dragRowId.current!);
+                            localStorage.setItem('zamzam_fast_custom_sort_order', JSON.stringify(updated));
+                            setHasUnsavedCustomOrder(true);
+                            return updated;
+                          });
+                        }
+                        dragRowId.current = null;
+                        dragOverRowId.current = null;
+                        setIsDragging(null);
+                        setDragOver(null);
+                      } : undefined}
                       onClick={() => {
                         if (isWhatsAppEnabled && row.customerId) handleSelectCustomerForWhatsApp(row.customerId);
                       }}
                       style={{
-                        cursor: (isWhatsAppEnabled && row.customerId) ? 'pointer' : 'default',
+                        cursor: (orderSort === 'CUSTOM' && isCustomEditing) ? 'grab' : (isWhatsAppEnabled && row.customerId) ? 'pointer' : 'default',
+                        opacity: isBeingDragged ? 0.45 : 1,
+                        transition: 'opacity 0.15s, background 0.12s',
                         background:
-                          (isWhatsAppEnabled && activeCustomer?.id === row.customerId)
+                          isDraggedOver
+                            ? 'rgba(79, 70, 229, 0.10)'
+                            : (isWhatsAppEnabled && activeCustomer?.id === row.customerId)
                             ? 'rgba(16, 185, 129, 0.12)'
                             : row.orderSource === 'CUSTOMER_LINK'
                             ? '#f0fdf4'
@@ -2545,20 +3359,127 @@ export const CreateOrderPage: React.FC = () => {
                             ? '#f8fafc'
                             : undefined,
                         borderLeft:
-                          (isWhatsAppEnabled && activeCustomer?.id === row.customerId)
+                          isDraggedOver
+                            ? '3px solid #4f46e5'
+                            : (isWhatsAppEnabled && activeCustomer?.id === row.customerId)
                             ? '4px solid #059669'
                             : row.orderSource === 'CUSTOMER_LINK'
                             ? '4px solid #10b981'
                             : undefined,
+                        outline: isDraggedOver ? '1px dashed #4f46e5' : undefined,
                       }}
                     >
-                      {/* Index */}
-                      <td style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.76rem', padding: '0.35rem 0.25rem' }}>
-                        {index + 1}
+                      {/* Drag & Move Handle (only in CUSTOM sort mode when editing) */}
+                      {orderSort === 'CUSTOM' && isCustomEditing && (
+                        <td
+                          style={{
+                            textAlign: 'center',
+                            padding: '0.12rem 0.2rem',
+                            userSelect: 'none',
+                            lineHeight: 1,
+                            whiteSpace: 'nowrap',
+                            minWidth: '42px',
+                          }}
+                        >
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', justifyContent: 'center' }}>
+                            <span
+                              style={{ cursor: 'grab', color: '#6366f1', fontSize: '0.95rem', fontWeight: 900 }}
+                              title="Drag up or down to reorder"
+                            >
+                              ⠿
+                            </span>
+                            <div style={{ display: 'inline-flex', flexDirection: 'column', gap: '1px' }}>
+                              <button
+                                type="button"
+                                disabled={index === 0}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleMoveCustomRow(row.rowId, 'UP');
+                                }}
+                                style={{
+                                  padding: 0,
+                                  width: '16px',
+                                  height: '11px',
+                                  lineHeight: '9px',
+                                  fontSize: '0.52rem',
+                                  background: index === 0 ? '#f1f5f9' : '#e0e7ff',
+                                  color: index === 0 ? '#cbd5e1' : '#4338ca',
+                                  border: '1px solid #c7d2fe',
+                                  borderRadius: '2px',
+                                  cursor: index === 0 ? 'default' : 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                }}
+                                title="Move shop UP"
+                              >
+                                ▲
+                              </button>
+                              <button
+                                type="button"
+                                disabled={index === visibleRows.length - 1}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleMoveCustomRow(row.rowId, 'DOWN');
+                                }}
+                                style={{
+                                  padding: 0,
+                                  width: '16px',
+                                  height: '11px',
+                                  lineHeight: '9px',
+                                  fontSize: '0.52rem',
+                                  background: index === visibleRows.length - 1 ? '#f1f5f9' : '#e0e7ff',
+                                  color: index === visibleRows.length - 1 ? '#cbd5e1' : '#4338ca',
+                                  border: '1px solid #c7d2fe',
+                                  borderRadius: '2px',
+                                  cursor: index === visibleRows.length - 1 ? 'default' : 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                }}
+                                title="Move shop DOWN"
+                              >
+                                ▼
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+                      )}
+                      {/* Index / List Order */}
+                      <td style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.74rem', padding: '0.25rem 0.2rem' }}>
+                        {orderSort === 'CUSTOM' ? (
+                          <span
+                            title={`Custom Stop #${index + 1}`}
+                            style={{
+                              fontWeight: 800,
+                              color: '#4f46e5',
+                              background: '#eef2ff',
+                              padding: '0.1rem 0.35rem',
+                              borderRadius: '4px',
+                            }}
+                          >
+                            #{index + 1}
+                          </span>
+                        ) : row.listOrder !== undefined ? (
+                          <span
+                            title={`Delivery Stop #${row.listOrder}`}
+                            style={{
+                              fontWeight: 800,
+                              color: 'var(--primary)',
+                              background: '#eff6ff',
+                              padding: '0.1rem 0.35rem',
+                              borderRadius: '4px',
+                            }}
+                          >
+                            #{row.listOrder}
+                          </span>
+                        ) : (
+                          index + 1
+                        )}
                       </td>
 
-                      {/* Shop Name */}
-                      <td style={{ padding: '0.4rem 0.65rem', minWidth: '180px', maxWidth: '260px' }}>
+                      {/* Shop Name - Compact single-row layout */}
+                      <td style={{ padding: '0.18rem 0.4rem', minWidth: '170px', maxWidth: '250px' }}>
                         {row.isCustomRow && !row.customerId ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
                             <select
@@ -2585,185 +3506,69 @@ export const CreateOrderPage: React.FC = () => {
                           </div>
                         ) : (
                           <>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.35rem', flexWrap: 'wrap' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', minWidth: 0, flexWrap: 'wrap' }}>
-                                <div style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.86rem', lineHeight: 1.25, wordBreak: 'break-word' }}>
-                                  {row.customerName || 'Walk-in Customer'}
-                                </div>
-                                {row.isCustomRow && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setRows((prev) =>
-                                        prev.map((r) =>
-                                          r.rowId === row.rowId
-                                            ? { ...r, customerId: '', customerName: '', customerOwner: '', customerRoute: 'Walk-in / Custom', customerBalance: '0' }
-                                            : r
-                                        )
-                                      );
-                                    }}
-                                    style={{
-                                      fontSize: '0.62rem',
-                                      padding: '0.05rem 0.3rem',
-                                      background: '#fef3c7',
-                                      color: '#b45309',
-                                      border: '1px solid #fde68a',
-                                      borderRadius: '3px',
-                                      cursor: 'pointer',
-                                    }}
-                                    title="Change customer shop"
-                                  >
-                                    Change
-                                  </button>
-                                )}
-                                {isWhatsAppEnabled && activeCustomer?.id === row.customerId && (
-                                  <span
-                                    title="Active in WhatsApp panel"
-                                    style={{
-                                      fontSize: '0.64rem',
-                                      background: '#dcfce7',
-                                      color: '#15803d',
-                                      padding: '0.08rem 0.35rem',
-                                      borderRadius: '4px',
-                                      fontWeight: 800,
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '2px',
-                                      border: '1px solid #86efac',
-                                      whiteSpace: 'nowrap',
-                                    }}
-                                  >
-                                    💬 WhatsApp
-                                  </span>
-                                )}
-                              </div>
-                              {row.customerId && isSelfOrderEnabled && (
-                                <a
-                                  href={`/customer/${row.customerId}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  title="Open Customer Self-Order Screen"
-                                  style={{
-                                    color: '#059669',
-                                    fontSize: '0.67rem',
-                                    fontWeight: 600,
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '0.15rem',
-                                    textDecoration: 'none',
-                                    background: '#ecfdf5',
-                                    border: '1px solid #a7f3d0',
-                                    padding: '0.08rem 0.35rem',
-                                    borderRadius: '4px',
-                                    flexShrink: 0,
-                                    whiteSpace: 'nowrap',
-                                  }}
+                            {/* Compact single-row: Name + Edit + mini-badges all inline */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.22rem', flexWrap: 'wrap', lineHeight: 1.2 }}>
+                              <span style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.82rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '155px' }} title={row.customerName}>
+                                {row.customerName || 'Walk-in'}
+                              </span>
+                              {row.customerId && (orderSort !== 'CUSTOM' || isCustomEditing) && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); handleOpenCustomerEdit(row.customerId); }}
+                                  title={`Edit ${row.customerName}`}
+                                  style={{ fontSize: '0.58rem', padding: '0.03rem 0.22rem', background: '#f0f9ff', color: '#0284c7', border: '1px solid #bae6fd', borderRadius: '3px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '1px', fontWeight: 600, flexShrink: 0 }}
                                 >
-                                  <ExternalLink size={10} />
-                                  <span>Self-Order</span>
+                                  <Edit2 size={9} /><span>Edit</span>
+                                </button>
+                              )}
+                              {row.orderNumber ? (
+                                <span title={`Order #${row.orderNumber}`} style={{ fontSize: '0.6rem', fontWeight: 800, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', borderRadius: '3px', padding: '0.03rem 0.25rem', whiteSpace: 'nowrap', flexShrink: 0 }}>#{row.orderNumber}</span>
+                              ) : (
+                                <button type="button" onClick={() => { const v = window.prompt(`Order # for ${row.customerName || 'shop'}:`, ''); if (v !== null) handleSetRowOrderDetails(row.rowId, v.trim() || undefined); }} style={{ fontSize: '0.58rem', padding: '0.03rem 0.22rem', background: 'transparent', color: 'var(--text-muted)', border: '1px dashed var(--border)', borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }} title="Add order#">+Ord#</button>
+                              )}
+                              {(orderSort === 'SHOP_CREATE_ASC' || orderSort === 'CUSTOM') && row.customerCreatedAt && (
+                                <span style={{ fontSize: '0.59rem', color: '#475569', background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '3px', padding: '0.03rem 0.25rem', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+                                  <Store size={9} style={{ color: '#64748b' }} />Reg: {new Date(row.customerCreatedAt).toLocaleDateString([], { day: '2-digit', month: 'short' })}
+                                </span>
+                              )}
+                              {row.customerId && isSelfOrderEnabled && (
+                                <a href={`/customer/${row.customerId}`} target="_blank" rel="noopener noreferrer" title="Self-Order link" onClick={(e) => e.stopPropagation()} style={{ fontSize: '0.59rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '1px', textDecoration: 'none', background: '#ecfdf5', border: '1px solid #a7f3d0', padding: '0.03rem 0.22rem', borderRadius: '3px', color: '#059669', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                                  <ExternalLink size={9} /><span>Self-Order</span>
                                 </a>
                               )}
-                            </div>
-                            {row.orderSource === 'CUSTOMER_LINK' && (
-                              <div style={{ marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
-                                <span
-                                  className="badge badge-success"
-                                  style={{
-                                    fontSize: '0.68rem',
-                                    padding: '0.12rem 0.45rem',
-                                    background: '#dcfce7',
-                                    color: '#15803d',
-                                    border: '1px solid #86efac',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '3px',
-                                    fontWeight: 700,
-                                    whiteSpace: 'nowrap',
-                                  }}
-                                >
-                                  <Smartphone size={10} />
-                                  <span>Customer Self-Order</span>
+                              {row.orderSource === 'CUSTOMER_LINK' && (
+                                <span style={{ fontSize: '0.6rem', background: '#dcfce7', color: '#15803d', border: '1px solid #86efac', borderRadius: '3px', padding: '0.03rem 0.25rem', fontWeight: 700, whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+                                  <Smartphone size={9} />
+                                  <span>Self-Order{(row.submittedAt || row.createdAt) ? ` ${formatOrderTime(row.submittedAt || row.createdAt)}` : ''}</span>
+                                  {!unlockedSelfOrderIds.has(row.rowId) && (
+                                    <button type="button" onClick={(e) => { e.stopPropagation(); setSelfOrderModalRow(row); setSelfOrderPendingField('kubbus'); }} style={{ fontSize: '0.57rem', padding: '0.02rem 0.18rem', background: '#fff', color: '#047857', border: '1px solid #10b981', borderRadius: '2px', cursor: 'pointer', fontWeight: 700, lineHeight: 1 }} title="Edit">Edit</button>
+                                  )}
+                                  {unlockedSelfOrderIds.has(row.rowId) && <span style={{ fontSize: '0.57rem', color: '#b45309', fontWeight: 700 }}>Unlocked</span>}
                                 </span>
-
-                                {unlockedSelfOrderIds.has(row.rowId) ? (
-                                  <span
-                                    style={{
-                                      fontSize: '0.68rem',
-                                      padding: '0.12rem 0.45rem',
-                                      background: '#fef3c7',
-                                      color: '#b45309',
-                                      border: '1px solid #fde68a',
-                                      borderRadius: '4px',
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '3px',
-                                      fontWeight: 700,
-                                      whiteSpace: 'nowrap',
-                                    }}
-                                  >
-                                    <Edit size={10} />
-                                    <span>Unlocked</span>
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setSelfOrderModalRow(row);
-                                      setSelfOrderPendingField('kubbus');
-                                    }}
-                                    style={{
-                                      fontSize: '0.68rem',
-                                      padding: '0.12rem 0.45rem',
-                                      background: '#ffffff',
-                                      color: '#047857',
-                                      border: '1px solid #10b981',
-                                      borderRadius: '4px',
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '3px',
-                                      fontWeight: 700,
-                                      cursor: 'pointer',
-                                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                                      whiteSpace: 'nowrap',
-                                    }}
-                                    title="Click to unlock and edit this customer self-order"
-                                  >
-                                    <Edit size={10} />
-                                    <span>Edit Order</span>
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                            {row.customerOwner && (
-                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.1, marginTop: '0.15rem' }}>
-                                {row.customerOwner}
-                              </div>
-                            )}
+                              )}
+                              {row.isCustomRow && (
+                                <button type="button" onClick={() => setRows((prev) => prev.map((r) => r.rowId === row.rowId ? { ...r, customerId: '', customerName: '', customerOwner: '', customerRoute: 'Walk-in / Custom', customerBalance: '0' } : r))} style={{ fontSize: '0.58rem', padding: '0.03rem 0.22rem', background: '#fef3c7', color: '#b45309', border: '1px solid #fde68a', borderRadius: '3px', cursor: 'pointer', flexShrink: 0 }} title="Change shop">Change</button>
+                              )}
+                              {isWhatsAppEnabled && activeCustomer?.id === row.customerId && (
+                                <span style={{ fontSize: '0.59rem', background: '#dcfce7', color: '#15803d', padding: '0.03rem 0.25rem', borderRadius: '3px', fontWeight: 800, flexShrink: 0, border: '1px solid #86efac', whiteSpace: 'nowrap' }}>💬 WA</span>
+                              )}
+                              {row.customerOwner && (
+                                <span style={{ fontSize: '0.67rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '90px' }}>{row.customerOwner}</span>
+                              )}
+                            </div>
                           </>
                         )}
                       </td>
 
-                      {/* Route & Driver Badge */}
-                      <td style={{ padding: '0.4rem 0.65rem', minWidth: '120px' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                          <span className="badge badge-neutral" style={{ fontSize: '0.7rem', padding: '0.12rem 0.45rem', alignSelf: 'flex-start', whiteSpace: 'nowrap' }}>
-                            {row.customerRoute || 'Pandikkad'}
+                      {/* Route & Driver Badge - compact */}
+                      <td style={{ padding: '0.18rem 0.45rem', minWidth: '105px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
+                          <span className="badge badge-neutral" style={{ fontSize: '0.67rem', padding: '0.06rem 0.35rem', alignSelf: 'flex-start', whiteSpace: 'nowrap' }}>
+                            {row.customerRoute || 'No Route'}
                           </span>
                           {row.driverName && (
-                            <span
-                              style={{
-                                fontSize: '0.68rem',
-                                color: autoConfirmDriver ? '#047857' : 'var(--text-muted)',
-                                fontWeight: 600,
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                whiteSpace: 'nowrap',
-                              }}
-                              title={`Driver assigned for delivery: ${row.driverName}`}
-                            >
-                              <Truck size={11} />
-                              {row.driverName}
+                            <span style={{ fontSize: '0.63rem', color: autoConfirmDriver ? '#047857' : 'var(--text-muted)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap' }} title={`Driver: ${row.driverName}`}>
+                              <Truck size={10} />{row.driverName}
                             </span>
                           )}
                         </div>
@@ -2774,9 +3579,9 @@ export const CreateOrderPage: React.FC = () => {
                         style={{
                           textAlign: 'right',
                           fontWeight: 700,
-                          fontSize: '0.84rem',
-                          padding: '0.4rem 0.65rem',
-                          minWidth: '85px',
+                          fontSize: '0.82rem',
+                          padding: '0.18rem 0.45rem',
+                          minWidth: '80px',
                           whiteSpace: 'nowrap',
                           color: parseFloat(row.customerBalance || '0') > 0 ? '#dc2626' : 'var(--text-secondary)',
                         }}
@@ -2784,128 +3589,199 @@ export const CreateOrderPage: React.FC = () => {
                         {formatCurrency(row.customerBalance || '0')}
                       </td>
 
-                      {/* Kubbus Input */}
-                      <td style={{ textAlign: 'right', padding: '0.25rem 0.45rem', minWidth: '88px' }}>
-                        <input
-                          ref={(el) => {
-                            inputRefs.current[`${index}_kubbus`] = el;
-                          }}
-                          type="number"
-                          min="0"
-                          step="1"
-                          placeholder="0"
-                          className="form-input"
-                          value={row.kubbusQty}
-                          readOnly={
+                      {/* Dynamic Product Columns */}
+                      {products.length > 0 ? (
+                        products.map((prod) => {
+                          const cellQty =
+                            row.productQuantities?.[prod.id] !== undefined
+                              ? row.productQuantities[prod.id]
+                              : kubbusProduct && prod.id === kubbusProduct.id
+                              ? row.kubbusQty
+                              : romaliProduct && prod.id === romaliProduct.id
+                              ? row.romaliQty
+                              : '';
+                          const isLocked =
                             (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                          }
-                          onClick={() => {
-                            if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                              setSelfOrderModalRow(row);
-                              setSelfOrderPendingField('kubbus');
-                            }
-                          }}
-                          onFocus={() => {
-                            if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                              setSelfOrderModalRow(row);
-                              setSelfOrderPendingField('kubbus');
-                              return;
-                            }
-                            if (row.customerId) fetchCustomerPricing(row.customerId);
-                          }}
-                          onChange={(e) => handleCellChange(row.rowId, 'kubbusQty', e.target.value)}
-                          onKeyDown={(e) => handleKeyDown(e, index, 'kubbus')}
-                          style={{
-                            width: '78px',
-                            height: '32px',
-                            textAlign: 'right',
-                            fontWeight: 800,
-                            padding: '0.2rem 0.4rem',
-                            fontSize: '0.88rem',
-                            display: 'inline-block',
-                            cursor: (
-                              (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                              (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                            ) ? 'pointer' : 'text',
-                            borderColor: row.kubbusQty ? '#f59e0b' : undefined,
-                            backgroundColor: (
-                              (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                              (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                            ) ? '#f9fafb' : row.kubbusQty ? '#fffbeb' : undefined,
-                          }}
-                          title={
-                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                              ? 'Customer Self-Order. Click to unlock and edit.'
-                              : row.status === 'LOCKED'
-                              ? 'Order is locked and cannot be edited. Use Reopen to modify.'
-                              : undefined
-                          }
-                        />
-                      </td>
+                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId));
 
-                      {/* Romali Roti Input */}
-                      <td style={{ textAlign: 'right', padding: '0.25rem 0.45rem', minWidth: '88px' }}>
-                        <input
-                          ref={(el) => {
-                            inputRefs.current[`${index}_romali`] = el;
-                          }}
-                          type="number"
-                          min="0"
-                          step="1"
-                          placeholder="0"
-                          className="form-input"
-                          value={row.romaliQty}
-                          readOnly={
-                            (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                          }
-                          onClick={() => {
-                            if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                              setSelfOrderModalRow(row);
-                              setSelfOrderPendingField('romali');
-                            }
-                          }}
-                          onFocus={() => {
-                            if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                              setSelfOrderModalRow(row);
-                              setSelfOrderPendingField('romali');
-                              return;
-                            }
-                            if (row.customerId) fetchCustomerPricing(row.customerId);
-                          }}
-                          onChange={(e) => handleCellChange(row.rowId, 'romaliQty', e.target.value)}
-                          onKeyDown={(e) => handleKeyDown(e, index, 'romali')}
-                          style={{
-                            width: '78px',
-                            height: '32px',
-                            textAlign: 'right',
-                            fontWeight: 800,
-                            padding: '0.2rem 0.4rem',
-                            fontSize: '0.88rem',
-                            display: 'inline-block',
-                            cursor: (
-                              (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                              (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                            ) ? 'pointer' : 'text',
-                            borderColor: row.romaliQty ? '#f97316' : undefined,
-                            backgroundColor: (
-                              (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                              (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                            ) ? '#f9fafb' : row.romaliQty ? '#fff7ed' : undefined,
-                          }}
-                          title={
-                            (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                              ? 'Customer Self-Order. Click to unlock and edit.'
-                              : row.status === 'LOCKED'
-                              ? 'Order is locked and cannot be edited. Use Reopen to modify.'
-                              : undefined
-                          }
-                        />
-                      </td>
+                          return (
+                            <td key={prod.id} style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
+                              <input
+                                ref={(el) => {
+                                  inputRefs.current[`${index}_prod_${prod.id}`] = el;
+                                }}
+                                type="number"
+                                min="0"
+                                step="1"
+                                placeholder="0"
+                                className="form-input"
+                                value={cellQty}
+                                readOnly={isLocked}
+                                onClick={() => {
+                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                    setSelfOrderModalRow(row);
+                                    setSelfOrderPendingField(`prod_${prod.id}`);
+                                  }
+                                }}
+                                onFocus={() => {
+                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                    setSelfOrderModalRow(row);
+                                    setSelfOrderPendingField(`prod_${prod.id}`);
+                                    return;
+                                  }
+                                  if (row.customerId) fetchCustomerPricing(row.customerId);
+                                }}
+                                onChange={(e) => handleProductQtyChange(row.rowId, prod.id, e.target.value)}
+                                onKeyDown={(e) => handleKeyDown(e, index, `prod_${prod.id}`)}
+                                style={{
+                                  width: '72px',
+                                  height: '28px',
+                                  textAlign: 'right',
+                                  fontWeight: 800,
+                                  padding: '0.15rem 0.35rem',
+                                  fontSize: '0.86rem',
+                                  display: 'inline-block',
+                                  cursor: isLocked ? 'pointer' : 'text',
+                                  borderColor: cellQty ? 'var(--primary)' : undefined,
+                                  backgroundColor: isLocked ? '#f9fafb' : cellQty ? 'var(--primary-subtle, #f0fdf4)' : undefined,
+                                }}
+                                title={
+                                  (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                    ? 'Customer Self-Order. Click to unlock and edit.'
+                                    : row.status === 'LOCKED'
+                                    ? 'Order is locked and cannot be edited. Use Reopen to modify.'
+                                    : `${prod.name}`
+                                }
+                              />
+                            </td>
+                          );
+                        })
+                      ) : (
+                        <>
+                          {/* Fallback Kubbus Input */}
+                          <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
+                            <input
+                              ref={(el) => {
+                                inputRefs.current[`${index}_kubbus`] = el;
+                              }}
+                              type="number"
+                              min="0"
+                              step="1"
+                              placeholder="0"
+                              className="form-input"
+                              value={row.kubbusQty}
+                              readOnly={
+                                (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                              }
+                              onClick={() => {
+                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                  setSelfOrderModalRow(row);
+                                  setSelfOrderPendingField('kubbus');
+                                }
+                              }}
+                              onFocus={() => {
+                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                  setSelfOrderModalRow(row);
+                                  setSelfOrderPendingField('kubbus');
+                                  return;
+                                }
+                                if (row.customerId) fetchCustomerPricing(row.customerId);
+                              }}
+                              onChange={(e) => handleCellChange(row.rowId, 'kubbusQty', e.target.value)}
+                              onKeyDown={(e) => handleKeyDown(e, index, 'kubbus')}
+                              style={{
+                                width: '72px',
+                                height: '28px',
+                                textAlign: 'right',
+                                fontWeight: 800,
+                                padding: '0.15rem 0.35rem',
+                                fontSize: '0.86rem',
+                                display: 'inline-block',
+                                cursor: (
+                                  (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                  (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                ) ? 'pointer' : 'text',
+                                borderColor: row.kubbusQty ? '#f59e0b' : undefined,
+                                backgroundColor: (
+                                  (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                  (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                ) ? '#f9fafb' : row.kubbusQty ? '#fffbeb' : undefined,
+                              }}
+                              title={
+                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                  ? 'Customer Self-Order. Click to unlock and edit.'
+                                  : row.status === 'LOCKED'
+                                  ? 'Order is locked and cannot be edited. Use Reopen to modify.'
+                                  : undefined
+                              }
+                            />
+                          </td>
+
+                          {/* Fallback Romali Roti Input */}
+                          <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
+                            <input
+                              ref={(el) => {
+                                inputRefs.current[`${index}_romali`] = el;
+                              }}
+                              type="number"
+                              min="0"
+                              step="1"
+                              placeholder="0"
+                              className="form-input"
+                              value={row.romaliQty}
+                              readOnly={
+                                (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                              }
+                              onClick={() => {
+                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                  setSelfOrderModalRow(row);
+                                  setSelfOrderPendingField('romali');
+                                }
+                              }}
+                              onFocus={() => {
+                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                  setSelfOrderModalRow(row);
+                                  setSelfOrderPendingField('romali');
+                                  return;
+                                }
+                                if (row.customerId) fetchCustomerPricing(row.customerId);
+                              }}
+                              onChange={(e) => handleCellChange(row.rowId, 'romaliQty', e.target.value)}
+                              onKeyDown={(e) => handleKeyDown(e, index, 'romali')}
+                              style={{
+                                width: '72px',
+                                height: '28px',
+                                textAlign: 'right',
+                                fontWeight: 800,
+                                padding: '0.15rem 0.35rem',
+                                fontSize: '0.86rem',
+                                display: 'inline-block',
+                                cursor: (
+                                  (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                  (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                ) ? 'pointer' : 'text',
+                                borderColor: row.romaliQty ? '#f97316' : undefined,
+                                backgroundColor: (
+                                  (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                  (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                ) ? '#f9fafb' : row.romaliQty ? '#fff7ed' : undefined,
+                              }}
+                              title={
+                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                  ? 'Customer Self-Order. Click to unlock and edit.'
+                                  : row.status === 'LOCKED'
+                                  ? 'Order is locked and cannot be edited. Use Reopen to modify.'
+                                  : undefined
+                              }
+                            />
+                          </td>
+                        </>
+                      )}
 
                       {/* Cash Input */}
-                      <td style={{ textAlign: 'right', padding: '0.25rem 0.45rem', minWidth: '88px' }}>
+                      <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
                         <input
                           ref={(el) => {
                             inputRefs.current[`${index}_cash`] = el;
@@ -2922,12 +3798,12 @@ export const CreateOrderPage: React.FC = () => {
                           onChange={(e) => handleCellChange(row.rowId, 'cashAmount', e.target.value)}
                           onKeyDown={(e) => handleKeyDown(e, index, 'cash')}
                           style={{
-                            width: '78px',
-                            height: '32px',
+                            width: '72px',
+                            height: '28px',
                             textAlign: 'right',
                             fontWeight: 800,
-                            padding: '0.2rem 0.4rem',
-                            fontSize: '0.86rem',
+                            padding: '0.15rem 0.35rem',
+                            fontSize: '0.84rem',
                             display: 'inline-block',
                             borderColor: row.cashAmount ? '#10b981' : undefined,
                           }}
@@ -2935,7 +3811,7 @@ export const CreateOrderPage: React.FC = () => {
                       </td>
 
                       {/* GPay Input */}
-                      <td style={{ textAlign: 'right', padding: '0.25rem 0.45rem', minWidth: '88px' }}>
+                      <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
                         <input
                           ref={(el) => {
                             inputRefs.current[`${index}_gpay`] = el;
@@ -2952,12 +3828,12 @@ export const CreateOrderPage: React.FC = () => {
                           onChange={(e) => handleCellChange(row.rowId, 'gpayAmount', e.target.value)}
                           onKeyDown={(e) => handleKeyDown(e, index, 'gpay')}
                           style={{
-                            width: '78px',
-                            height: '32px',
+                            width: '72px',
+                            height: '28px',
                             textAlign: 'right',
                             fontWeight: 800,
-                            padding: '0.2rem 0.4rem',
-                            fontSize: '0.86rem',
+                            padding: '0.15rem 0.35rem',
+                            fontSize: '0.84rem',
                             display: 'inline-block',
                             borderColor: row.gpayAmount ? '#dc2626' : undefined,
                           }}
@@ -2966,7 +3842,7 @@ export const CreateOrderPage: React.FC = () => {
 
                       {/* Bill Total */}
                       <td
-                        style={{ textAlign: 'right', fontWeight: 800, color: '#dc2626', fontSize: '0.92rem', padding: '0.4rem 0.65rem', minWidth: '90px', whiteSpace: 'nowrap' }}
+                        style={{ textAlign: 'right', fontWeight: 800, color: '#dc2626', fontSize: '0.88rem', padding: '0.18rem 0.45rem', minWidth: '80px', whiteSpace: 'nowrap' }}
                         title={`Bill: ${formatCurrency(fin.rowTotal)}`}
                       >
                         <div>{formatCurrency(fin.rowTotal)}</div>
@@ -2977,9 +3853,9 @@ export const CreateOrderPage: React.FC = () => {
                         style={{
                           textAlign: 'right',
                           fontWeight: 800,
-                          fontSize: '0.86rem',
-                          padding: '0.4rem 0.65rem',
-                          minWidth: '95px',
+                          fontSize: '0.84rem',
+                          padding: '0.18rem 0.45rem',
+                          minWidth: '85px',
                           whiteSpace: 'nowrap',
                         }}
                         title={`Prev Due: ${formatCurrency(fin.prevDue)} + Bill: ${formatCurrency(fin.rowTotal)} - Paid: ${formatCurrency(fin.rowPaid)} = ${formatCurrency(fin.rowBalance)}`}
@@ -3002,7 +3878,7 @@ export const CreateOrderPage: React.FC = () => {
                       </td>
 
                       {/* Status */}
-                      <td style={{ textAlign: 'center', padding: '0.35rem 0.35rem' }}>
+                      <td style={{ textAlign: 'center', padding: '0.12rem 0.25rem' }}>
                         {row.orderSource === 'CUSTOMER_LINK' ? (
                           unlockedSelfOrderIds.has(row.rowId) ? (
                             <span
@@ -3097,36 +3973,64 @@ export const CreateOrderPage: React.FC = () => {
                           >
                             <Save size={14} />
                           </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleRemoveRow(row.rowId);
-                            }}
-                            title={`Remove ${row.customerName || 'row'} from list`}
-                            style={{
-                              background: 'none',
-                              border: 'none',
-                              cursor: 'pointer',
-                              padding: '4px',
-                              borderRadius: '4px',
-                              color: 'var(--text-muted)',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              transition: 'all 0.15s ease',
-                            }}
-                            onMouseEnter={(e) => {
-                              e.currentTarget.style.color = '#dc2626';
-                              e.currentTarget.style.backgroundColor = 'var(--danger-bg)';
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.color = 'var(--text-muted)';
-                              e.currentTarget.style.backgroundColor = 'transparent';
-                            }}
-                          >
-                            <Trash2 size={15} />
-                          </button>
+
+                          {row.orderId && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePrintRowOrder(row);
+                              }}
+                              title={`Print bill / slip for Order #${row.orderNumber || ''}`}
+                              style={{
+                                background: '#fef2f2',
+                                border: '1px solid #fecaca',
+                                cursor: 'pointer',
+                                padding: '4px 6px',
+                                borderRadius: '4px',
+                                color: '#b91c1c',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                transition: 'all 0.15s ease',
+                              }}
+                            >
+                              <Printer size={14} />
+                            </button>
+                          )}
+
+                          {(orderSort !== 'CUSTOM' || isCustomEditing || row.isCustomRow) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemoveRow(row.rowId);
+                              }}
+                              title={`Remove ${row.customerName || 'row'} from list`}
+                              style={{
+                                background: 'none',
+                                border: 'none',
+                                cursor: 'pointer',
+                                padding: '4px',
+                                borderRadius: '4px',
+                                color: 'var(--text-muted)',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                transition: 'all 0.15s ease',
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.color = '#dc2626';
+                                e.currentTarget.style.backgroundColor = 'var(--danger-bg)';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.color = 'var(--text-muted)';
+                                e.currentTarget.style.backgroundColor = 'transparent';
+                              }}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -3214,7 +4118,7 @@ export const CreateOrderPage: React.FC = () => {
               <kbd style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '0.1rem 0.35rem', borderRadius: '4px', fontWeight: 700 }}>
                 Enter
               </kbd>{' '}
-              Kubbus &rarr; Romali &rarr; Next Shop
+              {products.length > 0 ? products.map((p) => p.name).join(' → ') : 'Kubbus → Romali'} → Next Shop
             </span>
             <span>
               <kbd style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '0.1rem 0.35rem', borderRadius: '4px', fontWeight: 700 }}>
@@ -3242,8 +4146,7 @@ export const CreateOrderPage: React.FC = () => {
             left: 0,
             right: 0,
             bottom: 0,
-            background: 'rgba(0, 0, 0, 0.55)',
-            backdropFilter: 'blur(3px)',
+            background: 'rgba(15, 23, 42, 0.6)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -3254,11 +4157,11 @@ export const CreateOrderPage: React.FC = () => {
           <div
             className="card"
             style={{
-              padding: '1.5rem',
+              padding: '1.25rem 1.5rem',
               width: '100%',
               maxWidth: '540px',
-              boxShadow: 'var(--shadow-lg)',
-              borderRadius: '12px',
+              boxShadow: 'var(--shadow-md)',
+              borderRadius: '8px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
@@ -3353,35 +4256,63 @@ export const CreateOrderPage: React.FC = () => {
                 <span>Bulk Set Preset Quantities</span>
               </div>
               
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
-                <div>
-                  <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
-                    Kubbus Qty (pkts)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    className="form-input"
-                    value={autoKubbusQty}
-                    onChange={(e) => setAutoKubbusQty(e.target.value)}
-                    placeholder="e.g. 10"
-                    style={{ fontWeight: 700 }}
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
-                    Romali Qty (pkts)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    className="form-input"
-                    value={autoRomaliQty}
-                    onChange={(e) => setAutoRomaliQty(e.target.value)}
-                    placeholder="e.g. 5"
-                    style={{ fontWeight: 700 }}
-                  />
-                </div>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: products.length > 2 ? 'repeat(auto-fit, minmax(130px, 1fr))' : '1fr 1fr',
+                  gap: '0.75rem',
+                  marginBottom: '0.75rem',
+                }}
+              >
+                {products.length > 0 ? (
+                  products.map((p) => (
+                    <div key={p.id}>
+                      <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
+                        {p.name} (pkts)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        className="form-input"
+                        value={autoProductQtys[p.id] ?? ''}
+                        onChange={(e) => setAutoProductQtys((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                        placeholder="e.g. 10"
+                        style={{ fontWeight: 700 }}
+                      />
+                    </div>
+                  ))
+                ) : (
+                  <>
+                    <div>
+                      <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
+                        Kubbus Qty (pkts)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        className="form-input"
+                        value={autoKubbusQty}
+                        onChange={(e) => setAutoKubbusQty(e.target.value)}
+                        placeholder="e.g. 10"
+                        style={{ fontWeight: 700 }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '0.78rem', fontWeight: 700, display: 'block', marginBottom: '0.25rem' }}>
+                        Romali Qty (pkts)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        className="form-input"
+                        value={autoRomaliQty}
+                        onChange={(e) => setAutoRomaliQty(e.target.value)}
+                        placeholder="e.g. 5"
+                        style={{ fontWeight: 700 }}
+                      />
+                    </div>
+                  </>
+                )}
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -3493,7 +4424,9 @@ export const CreateOrderPage: React.FC = () => {
             style={{
               padding: '1.5rem',
               width: '100%',
-              maxWidth: '500px',
+              maxWidth: '560px',
+              maxHeight: '90vh',
+              overflowY: 'auto',
               boxShadow: 'var(--shadow-lg)',
             }}
           >
@@ -3613,47 +4546,148 @@ export const CreateOrderPage: React.FC = () => {
                 />
               </div>
 
-              {/* Wholesale Rates */}
+              {/* Stop Sequence & Custom Order Number Options */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem', marginBottom: '0.75rem' }}>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>
+                    Route Stop / List Order
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    className="form-input"
+                    placeholder={`e.g. ${rows.length + 1}`}
+                    value={newCustListOrder}
+                    onChange={(e) => setNewCustListOrder(e.target.value)}
+                    style={{ height: '34px', padding: '0.25rem 0.5rem' }}
+                    title="Sequence number in delivery route / order sheet"
+                  />
+                </div>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>
+                    Today's Order # (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. ORD-1001 or Slip #"
+                    value={newCustOrderNumber}
+                    onChange={(e) => setNewCustOrderNumber(e.target.value)}
+                    style={{ height: '34px', padding: '0.25rem 0.5rem' }}
+                    title="Specify a custom order number for today, or leave blank to auto-generate"
+                  />
+                </div>
+              </div>
+
+              {/* Dynamic Products: Wholesale Rates & Today's Order Quantities Set Simultaneously */}
               <div
                 style={{
                   background: 'var(--bg-main)',
                   border: '1px solid var(--border)',
                   borderRadius: 'var(--radius-md)',
-                  padding: '0.65rem',
+                  padding: '0.75rem',
                   marginBottom: '1rem',
                 }}
               >
-                <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                  Agreed Wholesale Rates (₹)
-                </span>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem', marginTop: '0.35rem' }}>
-                  <div>
-                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.15rem' }}>
-                      Kubbus Rate (₹/ps)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      className="form-input"
-                      value={newCustKubbusPrice}
-                      onChange={(e) => setNewCustKubbusPrice(e.target.value)}
-                      style={{ height: '32px', padding: '0.2rem 0.45rem' }}
-                    />
-                  </div>
-                  <div>
-                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.15rem' }}>
-                      Romali Rate (₹/ps)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      className="form-input"
-                      value={newCustRomaliPrice}
-                      onChange={(e) => setNewCustRomaliPrice(e.target.value)}
-                      style={{ height: '32px', padding: '0.2rem 0.45rem' }}
-                    />
-                  </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                  <span style={{ fontSize: '0.75rem', fontWeight: 800, color: 'var(--text-primary)', textTransform: 'uppercase' }}>
+                    Shop Products & Initial Order
+                  </span>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    Wholesale Price & Today's Qty
+                  </span>
                 </div>
+
+                {products.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '220px', overflowY: 'auto' }}>
+                    {products.map((prod) => (
+                      <div
+                        key={prod.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '1.2fr 1fr 1fr',
+                          gap: '0.5rem',
+                          alignItems: 'center',
+                          background: 'var(--bg-card)',
+                          padding: '0.4rem 0.6rem',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border-light, #e2e8f0)',
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '0.8rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>
+                            {prod.name}
+                          </div>
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            Standard: ₹{parseFloat(prod.unit_price).toFixed(2)}
+                          </div>
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.1rem' }}>
+                            Rate (₹)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            className="form-input"
+                            value={newCustProductPrices[prod.id] ?? prod.unit_price}
+                            onChange={(e) =>
+                              setNewCustProductPrices((prev) => ({ ...prev, [prod.id]: e.target.value }))
+                            }
+                            style={{ height: '30px', padding: '0.15rem 0.35rem', fontSize: '0.82rem', textAlign: 'right' }}
+                            placeholder="Price"
+                          />
+                        </div>
+                        <div>
+                          <label style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.1rem' }}>
+                            Today's Qty
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            className="form-input"
+                            value={newCustProductQuantities[prod.id] ?? ''}
+                            onChange={(e) =>
+                              setNewCustProductQuantities((prev) => ({ ...prev, [prod.id]: e.target.value }))
+                            }
+                            style={{ height: '30px', padding: '0.15rem 0.35rem', fontSize: '0.82rem', textAlign: 'right', fontWeight: 700 }}
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem' }}>
+                    <div>
+                      <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.15rem' }}>
+                        Kubbus Rate (₹/ps)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        className="form-input"
+                        value={newCustKubbusPrice}
+                        onChange={(e) => setNewCustKubbusPrice(e.target.value)}
+                        style={{ height: '32px', padding: '0.2rem 0.45rem' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block', marginBottom: '0.15rem' }}>
+                        Romali Rate (₹/ps)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        className="form-input"
+                        value={newCustRomaliPrice}
+                        onChange={(e) => setNewCustRomaliPrice(e.target.value)}
+                        style={{ height: '32px', padding: '0.2rem 0.45rem' }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
@@ -3821,18 +4855,50 @@ export const CreateOrderPage: React.FC = () => {
                   <span style={{ fontWeight: 700, color: '#059669' }}>#{selfOrderModalRow.orderNumber}</span>
                 </div>
               )}
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Kubbus Ordered:</span>
-                <span style={{ fontWeight: 800, color: '#f59e0b' }}>
-                  {selfOrderModalRow.kubbusQty ? `${selfOrderModalRow.kubbusQty} pkts` : '0 pkts'}
-                </span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Romali Ordered:</span>
-                <span style={{ fontWeight: 800, color: '#f97316' }}>
-                  {selfOrderModalRow.romaliQty ? `${selfOrderModalRow.romaliQty} pkts` : '0 pkts'}
-                </span>
-              </div>
+              {(selfOrderModalRow.submittedAt || selfOrderModalRow.createdAt) && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Order Placed At:</span>
+                  <span style={{ fontWeight: 600, color: '#0369a1' }}>
+                    🕒 {formatOrderDateTime(selfOrderModalRow.submittedAt || selfOrderModalRow.createdAt)}
+                  </span>
+                </div>
+              )}
+              {products.length > 0 ? (
+                products.map((p) => {
+                  const qty =
+                    selfOrderModalRow.productQuantities?.[p.id] !== undefined
+                      ? selfOrderModalRow.productQuantities[p.id]
+                      : kubbusProduct && p.id === kubbusProduct.id
+                      ? selfOrderModalRow.kubbusQty
+                      : romaliProduct && p.id === romaliProduct.id
+                      ? selfOrderModalRow.romaliQty
+                      : '0';
+                  if (!qty || qty === '0') return null;
+                  return (
+                    <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
+                      <span style={{ color: 'var(--text-muted)' }}>{p.name} Ordered:</span>
+                      <span style={{ fontWeight: 800, color: 'var(--primary)' }}>
+                        {qty} pkts
+                      </span>
+                    </div>
+                  );
+                })
+              ) : (
+                <>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Kubbus Ordered:</span>
+                    <span style={{ fontWeight: 800, color: '#f59e0b' }}>
+                      {selfOrderModalRow.kubbusQty ? `${selfOrderModalRow.kubbusQty} pkts` : '0 pkts'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Romali Ordered:</span>
+                    <span style={{ fontWeight: 800, color: '#f97316' }}>
+                      {selfOrderModalRow.romaliQty ? `${selfOrderModalRow.romaliQty} pkts` : '0 pkts'}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
 
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.45, marginBottom: '1.25rem' }}>
@@ -3893,6 +4959,202 @@ export const CreateOrderPage: React.FC = () => {
                 <span>Unlock & Edit Order</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 5.5 Edit Customer Details Modal */}
+      {isEditCustomerModalOpen && editingCustomer && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '1rem',
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !editCustSubmitting) {
+              setIsEditCustomerModalOpen(false);
+            }
+          }}
+        >
+          <div
+            className="card"
+            style={{
+              padding: '1.5rem',
+              width: '100%',
+              maxWidth: '560px',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              boxShadow: 'var(--shadow-lg)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Store size={20} color="var(--primary)" />
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>
+                  Edit Customer Details
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditCustomerModalOpen(false)}
+                disabled={editCustSubmitting}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {editCustError && (
+              <div className="alert alert-error" style={{ marginBottom: '0.75rem', fontSize: '0.82rem', padding: '0.4rem 0.65rem' }}>
+                {editCustError}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveCustomerEdit}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem', marginBottom: '0.65rem' }}>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Shop Name *</label>
+                  <input
+                    type="text"
+                    required
+                    className="form-input"
+                    value={editCustName}
+                    onChange={(e) => setEditCustName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Owner / Contact Person</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editCustOwner}
+                    onChange={(e) => setEditCustOwner(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem', marginBottom: '0.65rem' }}>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Phone Number *</label>
+                  <input
+                    type="tel"
+                    required
+                    className="form-input"
+                    value={editCustPhone}
+                    onChange={(e) => setEditCustPhone(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Alternative Phone</label>
+                  <input
+                    type="tel"
+                    className="form-input"
+                    value={editCustAltPhone}
+                    onChange={(e) => setEditCustAltPhone(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem', marginBottom: '0.65rem' }}>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Route Assignment</label>
+                  <select
+                    className="form-select"
+                    value={editCustRoute}
+                    onChange={(e) => setEditCustRoute(e.target.value)}
+                  >
+                    <option value="">-- Select Route --</option>
+                    {routes.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} ({r.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Credit Limit (₹)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="form-input"
+                    value={editCustCreditLimit}
+                    onChange={(e) => setEditCustCreditLimit(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '0.65rem' }}>
+                <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Address</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={editCustAddress}
+                  onChange={(e) => setEditCustAddress(e.target.value)}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.65rem', marginBottom: '0.65rem' }}>
+                <div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Landmark</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editCustLandmark}
+                    onChange={(e) => setEditCustLandmark(e.target.value)}
+                  />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', marginTop: '1.4rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer', fontSize: '0.84rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={editCustIsActive}
+                      onChange={(e) => setEditCustIsActive(e.target.checked)}
+                    />
+                    <span>Active Customer</span>
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '1rem' }}>
+                <label className="form-label" style={{ fontSize: '0.8rem', marginBottom: '0.2rem' }}>Notes</label>
+                <textarea
+                  className="form-input"
+                  rows={2}
+                  value={editCustNotes}
+                  onChange={(e) => setEditCustNotes(e.target.value)}
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={editCustSubmitting}
+                  onClick={() => setIsEditCustomerModalOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={editCustSubmitting}
+                  style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                >
+                  {editCustSubmitting ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                  <span>{editCustSubmitting ? 'Saving...' : 'Save Changes'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -3967,6 +5229,15 @@ export const CreateOrderPage: React.FC = () => {
           <MessageCircle size={17} />
           <span>Open WhatsApp Feed</span>
         </button>
+      )}
+
+      {/* Invoice Modal for Order Printing / Thermal POS Slip */}
+      {invoiceModalOrder && (
+        <InvoiceModal
+          order={invoiceModalOrder.order}
+          customer={invoiceModalOrder.customer}
+          onClose={() => setInvoiceModalOrder(null)}
+        />
       )}
     </div>
   );
