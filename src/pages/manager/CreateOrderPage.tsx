@@ -46,9 +46,11 @@ import {
   ChevronUp,
   ChevronDown,
   ArrowUpDown,
+  BarChart2,
 } from 'lucide-react';
 import { RealWhatsAppWebView } from '../../components/RealWhatsAppWebView';
 import { InvoiceModal } from '../../components/InvoiceModal';
+import { UniversalDatePicker } from '../../components/UniversalDatePicker';
 import { useSettings } from '../../context/SettingsContext';
 import { draftOrderStorage } from '../../utils/draftOrderStorage';
 
@@ -77,6 +79,7 @@ export interface OrderRow {
   productQuantities?: Record<string, string>;
   cashAmount: string;
   gpayAmount: string;
+  discountAmount: string;
   status: 'IDLE' | 'SAVING' | 'SAVED' | 'ERROR' | 'LOCKED';
   orderId?: string;
   orderNumber?: string;
@@ -94,8 +97,7 @@ export interface OrderRow {
 
 export const CreateOrderPage: React.FC = () => {
   const navigate = useNavigate();
-  const location = useLocation();
-  const { isWhatsAppEnabled, isSelfOrderEnabled } = useSettings();
+  const { isWhatsAppEnabled, isSelfOrderEnabled, isOrderDiscountEnabled, isDriverModuleEnabled } = useSettings();
 
   // Master Data
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -122,6 +124,7 @@ export const CreateOrderPage: React.FC = () => {
     const day = String(today.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   });
+  const activeDateRef = useRef<string>(orderDate);
 
   // Day Opening & Closing Status for current date
   const [dayStatus, setDayStatus] = useState<{ is_opened: boolean; is_closed: boolean; opening_cash?: string } | null>(null);
@@ -168,6 +171,9 @@ export const CreateOrderPage: React.FC = () => {
   const [showOrdersOnly, setShowOrdersOnly] = useState<boolean>(() => {
     return localStorage.getItem('zamzam_show_orders_only') === 'true';
   });
+
+  // Manual toggle for downside product and collection summary (on All Routes)
+  const [showDownsideSummary, setShowDownsideSummary] = useState<boolean>(false);
 
   // Drag-and-drop state
   const dragRowId = useRef<string | null>(null);
@@ -319,8 +325,8 @@ export const CreateOrderPage: React.FC = () => {
 
       products.forEach((prod) => {
         const val = editCustProductPrices[prod.id];
-        if (val !== undefined && String(val).trim() !== '') {
-          const numVal = parseFloat(val.trim());
+        if (val !== undefined && val !== null && String(val).trim() !== '') {
+          const numVal = parseFloat(String(val).trim());
           if (!isNaN(numVal) && numVal > 0) {
             product_prices.push({ product_id: prod.id, price: numVal.toFixed(2) });
             updatedCacheEntry[prod.id] = numVal;
@@ -398,64 +404,9 @@ export const CreateOrderPage: React.FC = () => {
     setIsPrevDueModalOpen(true);
   };
 
-  const handleSavePrevDue = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!prevDueRow) return;
-
-    const val = parseFloat(prevDueAmount.trim() || '0');
-    if (isNaN(val) || val < 0) {
-      setPrevDueError('Please enter a valid positive amount.');
-      return;
-    }
-
-    const formattedAmount = val.toFixed(2);
-    const targetRow = prevDueRow;
-
-    // 1. Update in rows state immediately so today's sheet, previous due, and balance due update dynamically live
-    setRows((prev) =>
-      prev.map((r) =>
-        r.rowId === targetRow.rowId || (targetRow.customerId && r.customerId === targetRow.customerId)
-          ? { ...r, customerBalance: formattedAmount }
-          : r
-      )
-    );
-
-    // 2. Also update in customers state for software display
-    if (targetRow.customerId) {
-      setCustomers((prev) =>
-        prev.map((c) => (c.id === targetRow.customerId ? { ...c, current_balance: formattedAmount } : c))
-      );
-    }
-
-    setSuccessBanner(`Previous Due for "${targetRow.customerName || 'shop'}" updated to ${formatCurrency(formattedAmount)}!`);
-    setTimeout(() => setSuccessBanner(null), 3000);
-    setIsPrevDueModalOpen(false);
-
-    // 3. Persist automatically & dynamically to backend database!
-    if (targetRow.customerId) {
-      try {
-        await customerService.setBalance(targetRow.customerId, formattedAmount);
-      } catch (err) {
-        console.warn('Direct setBalance failed, trying credit adjustment fallback:', err);
-        try {
-          const oldBal = parseFloat(targetRow.customerBalance || '0');
-          const delta = (val - oldBal).toFixed(2);
-          if (parseFloat(delta) !== 0) {
-            await creditService.recordAdjustment({
-              customer_id: targetRow.customerId,
-              amount: delta,
-              notes: `Previous due set to ₹${formattedAmount} from Fast Wholesale Entry`,
-            });
-          }
-        } catch (fallbackErr) {
-          console.error('Failed to persist previous due to database:', fallbackErr);
-        }
-      }
-    }
-  };
-
-  // Selected Customer for WhatsApp Panel
+  // Selected Customer and Row for Billing & WhatsApp Panel
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
 
   // Workspace Mode: 'split' | 'billing_only' | 'whatsapp_only'
   const [workspaceMode, setWorkspaceMode] = useState<'split' | 'billing_only' | 'whatsapp_only'>(() => {
@@ -565,6 +516,9 @@ export const CreateOrderPage: React.FC = () => {
   // Input references for keyboard navigation
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
+  // Timestamp of the last user typing/data entry to prevent any background reloads while entering orders
+  const lastUserInputTimeRef = useRef<number>(0);
+
   // Products Identification (supports SKU codes KBS/KUB and PRI/ROM or name match)
   const kubbusProduct = products.find((p) => p.code === 'KBS' || p.code === 'KUB' || p.name.toLowerCase().includes('kubbus'));
   const romaliProduct = products.find((p) => p.code === 'PRI' || p.code === 'ROM' || p.name.toLowerCase().includes('romali'));
@@ -615,7 +569,13 @@ export const CreateOrderPage: React.FC = () => {
 
   // Load existing orders & payments from database for the selected date
   const loadOrdersForDate = useCallback(
-    async (targetDate: string, currentCustomers: Customer[], currentDrivers: Driver[], isBackground = false) => {
+    async (
+      targetDate: string,
+      currentCustomers: Customer[],
+      currentDrivers: Driver[],
+      isBackground = false,
+      isDateChange = false
+    ) => {
       if (currentCustomers.length === 0) {
         setRows([]);
         return;
@@ -704,17 +664,24 @@ export const CreateOrderPage: React.FC = () => {
 
           let cAmt = cashMap.get(cust.id);
           let gAmt = gpayMap.get(cust.id);
+          let dAmt = existingOrder?.shop_expense ? parseFloat(existingOrder.shop_expense) : undefined;
 
-          // Restore unsubmitted draft if no database order exists yet
+          // Restore unsubmitted draft if no database order exists yet OR draft has more recent modifications
           const draft = drafts[cust.id];
-          if (!existingOrder && draft) {
-            if (draft.productQuantities) {
-              Object.assign(productQuantities, draft.productQuantities);
+          if (draft) {
+            const hasExistingItems = existingOrder && existingOrder.items && existingOrder.items.length > 0;
+            const dbUpdatedTime = existingOrder ? new Date(existingOrder.updated_at || existingOrder.created_at || 0).getTime() : 0;
+            const isDraftNewer = !hasExistingItems || (draft.updatedAt && draft.updatedAt > dbUpdatedTime);
+            if (isDraftNewer || !existingOrder) {
+              if (draft.productQuantities) {
+                Object.assign(productQuantities, draft.productQuantities);
+              }
+              if (draft.kubbusQty !== undefined && draft.kubbusQty !== '') kQty = draft.kubbusQty;
+              if (draft.romaliQty !== undefined && draft.romaliQty !== '') rQty = draft.romaliQty;
+              if (cAmt === undefined && draft.cashAmount) cAmt = parseFloat(draft.cashAmount) || undefined;
+              if (gAmt === undefined && draft.gpayAmount) gAmt = parseFloat(draft.gpayAmount) || undefined;
+              if (dAmt === undefined && draft.discountAmount) dAmt = parseFloat(draft.discountAmount) || undefined;
             }
-            if (!kQty && draft.kubbusQty) kQty = draft.kubbusQty;
-            if (!rQty && draft.romaliQty) rQty = draft.romaliQty;
-            if (cAmt === undefined && draft.cashAmount) cAmt = parseFloat(draft.cashAmount) || undefined;
-            if (gAmt === undefined && draft.gpayAmount) gAmt = parseFloat(draft.gpayAmount) || undefined;
           }
 
           // Check if customer notes contain a stop number, e.g. [Stop #3]
@@ -747,6 +714,19 @@ export const CreateOrderPage: React.FC = () => {
 
           const isLocked = existingOrder && ['DELIVERED', 'COMPLETED', 'CANCELLED'].includes(existingOrder.status);
 
+          // Calculate previous due prior to this order so today's order is not double-counted in Previous Due column
+          let initialRowBalance = cust.current_balance || '0.00';
+          if (existingOrder) {
+            if (existingOrder.previous_balance !== undefined && existingOrder.previous_balance !== null) {
+              initialRowBalance = String(existingOrder.previous_balance);
+            } else if (existingOrder.total_amount) {
+              const oTot = parseFloat(existingOrder.total_amount) || 0;
+              const pPaid = (cAmt || 0) + (gAmt || 0);
+              const currentTotalBal = parseFloat(cust.current_balance || '0');
+              initialRowBalance = Math.max(0, currentTotalBal - oTot + pPaid).toFixed(2);
+            }
+          }
+
           return {
             rowId: `shop_${cust.id}`,
             customerId: cust.id,
@@ -754,7 +734,7 @@ export const CreateOrderPage: React.FC = () => {
             customerOwner: cust.owner_name || '',
             customerRouteId: custRouteId,
             customerRoute: custRouteName,
-            customerBalance: cust.current_balance,
+            customerBalance: initialRowBalance,
             driverId: existingOrder?.driver || routeDriver?.id,
             driverName: driverDisplay,
             kubbusQty: kQty,
@@ -762,6 +742,7 @@ export const CreateOrderPage: React.FC = () => {
             productQuantities,
             cashAmount: cAmt !== undefined ? cAmt.toFixed(2) : '',
             gpayAmount: gAmt !== undefined ? gAmt.toFixed(2) : '',
+            discountAmount: dAmt !== undefined ? dAmt.toFixed(2) : '',
             status: isLocked ? 'LOCKED' : (existingOrder ? 'SAVED' : 'IDLE'),
             orderId: existingOrder?.id,
             orderNumber: existingOrder?.order_number,
@@ -775,33 +756,53 @@ export const CreateOrderPage: React.FC = () => {
           };
         });
 
+        const isSwitchingDate = isDateChange || targetDate !== activeDateRef.current;
+        activeDateRef.current = targetDate;
+
         setUnlockedSelfOrderIds(new Set());
-        setRows((prevRows) => {
-          if (prevRows.length === 0) return populatedRows;
-          const editingMap = new Map<string, OrderRow>();
-          prevRows.forEach((r) => {
-            if (r.status === 'SAVING' || r.status === 'ERROR' || (r.customerId && Boolean(draftOrderStorage.getDraft(targetDate, r.customerId)))) {
-              editingMap.set(r.customerId, r);
-            }
+        if (isSwitchingDate) {
+          // Date switched: directly display the clean orders & drafts for the selected date!
+          setRows(populatedRows);
+        } else {
+          setRows((prevRows) => {
+            if (prevRows.length === 0) return populatedRows;
+            const editingMap = new Map<string, OrderRow>();
+            prevRows.forEach((r) => {
+              const hasUserInput = Boolean(
+                (r.kubbusQty && r.kubbusQty !== '0') ||
+                (r.romaliQty && r.romaliQty !== '0') ||
+                (r.cashAmount && r.cashAmount !== '0') ||
+                (r.gpayAmount && r.gpayAmount !== '0') ||
+                (r.discountAmount && r.discountAmount !== '0') ||
+                (r.productQuantities && Object.values(r.productQuantities).some((v) => v && v !== '0')) ||
+                r.status === 'SAVING' ||
+                r.status === 'ERROR' ||
+                (r.customerId && Boolean(draftOrderStorage.getDraft(targetDate, r.customerId)))
+              );
+              if (hasUserInput && r.customerId) {
+                editingMap.set(r.customerId, r);
+              }
+            });
+            if (editingMap.size === 0) return populatedRows;
+            return populatedRows.map((newRow) => {
+              const editing = editingMap.get(newRow.customerId);
+              if (editing) {
+                return {
+                  ...newRow,
+                  productQuantities: editing.productQuantities || newRow.productQuantities,
+                  kubbusQty: editing.kubbusQty,
+                  romaliQty: editing.romaliQty,
+                  cashAmount: editing.cashAmount,
+                  gpayAmount: editing.gpayAmount,
+                  discountAmount: editing.discountAmount,
+                  status: editing.status,
+                  errorMessage: editing.errorMessage,
+                };
+              }
+              return newRow;
+            });
           });
-          if (editingMap.size === 0) return populatedRows;
-          return populatedRows.map((newRow) => {
-            const editing = editingMap.get(newRow.customerId);
-            if (editing) {
-              return {
-                ...newRow,
-                productQuantities: editing.productQuantities || newRow.productQuantities,
-                kubbusQty: editing.kubbusQty,
-                romaliQty: editing.romaliQty,
-                cashAmount: editing.cashAmount,
-                gpayAmount: editing.gpayAmount,
-                status: editing.status,
-                errorMessage: editing.errorMessage,
-              };
-            }
-            return newRow;
-          });
-        });
+        }
       } catch (err: unknown) {
         console.error('Failed to load orders for date', targetDate, err);
         if (!isBackground) {
@@ -827,8 +828,14 @@ export const CreateOrderPage: React.FC = () => {
           routeService.getRoutes(),
           routeService.getDrivers(),
         ]);
+        const sortedProducts = [...prodList].sort((a, b) => {
+          const orderA = a.order_number ?? 999;
+          const orderB = b.order_number ?? 999;
+          if (orderA !== orderB) return orderA - orderB;
+          return (a.created_at || '').localeCompare(b.created_at || '');
+        });
         setCustomers(custList);
-        setProducts(prodList);
+        setProducts(sortedProducts);
         setRoutes(routeList);
         setDrivers(driverList);
 
@@ -881,13 +888,19 @@ export const CreateOrderPage: React.FC = () => {
   }, [loadOrdersForDate]);
 
   // When orderDate changes, automatically re-query database for that date!
-  const handleDateChange = (newDate: string) => {
+  const handleDateChange = async (newDate: string) => {
     setOrderDate(newDate);
     localStorage.setItem('zamzam_selected_order_date', newDate);
     setSuccessBanner(null);
     setUnlockedSelfOrderIds(new Set());
-    if (customers.length > 0) {
-      loadOrdersForDate(newDate, customers, drivers);
+    try {
+      const freshCusts = await customerService.getCustomers(undefined, undefined, true);
+      setCustomers(freshCusts);
+      loadOrdersForDate(newDate, freshCusts, drivers, false, true);
+    } catch {
+      if (customers.length > 0) {
+        loadOrdersForDate(newDate, customers, drivers, false, true);
+      }
     }
   };
 
@@ -895,6 +908,21 @@ export const CreateOrderPage: React.FC = () => {
   useEffect(() => {
     if (!autoSyncEnabled) return;
     const timer = setInterval(() => {
+      // 1. Never auto-sync/reload if user is actively focused on any input/textarea
+      const isInputActive = Boolean(
+        document.activeElement &&
+        (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')
+      );
+      if (isInputActive) {
+        return;
+      }
+
+      // 2. Never auto-sync/reload if user typed or entered anything in the last 60 seconds
+      if (Date.now() - lastUserInputTimeRef.current < 60000) {
+        return;
+      }
+
+      // 3. Never auto-sync/reload if currently submitting or no customers
       if (!isSubmittingAll && customers.length > 0) {
         loadOrdersForDate(orderDate, customers, drivers, true);
       }
@@ -940,7 +968,7 @@ export const CreateOrderPage: React.FC = () => {
   // Fetch and cache custom pricing for customer dynamically for all products
   const fetchCustomerPricing = useCallback(async (custId: string, forceRefresh = false) => {
     if (!custId) return;
-    if (!forceRefresh && pricingCache[custId] && Object.keys(pricingCache[custId]).length > 2) {
+    if (!forceRefresh && pricingCache[custId]) {
       return pricingCache[custId];
     }
 
@@ -997,6 +1025,11 @@ export const CreateOrderPage: React.FC = () => {
 
   // Keyboard navigation helper
   const focusCell = (visibleIndex: number, col: string) => {
+    const targetRow = visibleRows[visibleIndex];
+    if (targetRow) {
+      if (targetRow.customerId) setSelectedCustomerId(targetRow.customerId);
+      setSelectedRowId(targetRow.rowId);
+    }
     setTimeout(() => {
       let el = inputRefs.current[`${visibleIndex}_${col}`];
       if (!el && visibleRows[visibleIndex]?.customerId) {
@@ -1047,7 +1080,7 @@ export const CreateOrderPage: React.FC = () => {
         score += 5000 + (100 - Math.min(n.length, 100));
       }
       // 3. Any word in the shop name starts with search query (e.g. "Royal Star" -> "st")
-      else if (new RegExp(`(^|\\s)${q}`, 'i').test(n)) {
+      else if (new RegExp(`(^|\\s)${q.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}`, 'i').test(n)) {
         score += 3500;
       }
       // 4. Shop name contains search query
@@ -1089,6 +1122,9 @@ export const CreateOrderPage: React.FC = () => {
 
   // Bulletproof direct customer row & cell focus
   const focusCustomerCell = (customerId: string, col?: string) => {
+    setSelectedCustomerId(customerId);
+    const mRow = rows.find((r) => r.customerId === customerId);
+    if (mRow) setSelectedRowId(mRow.rowId);
     const doFocus = () => {
       const pCols = products.length > 0 ? products.map((p) => `prod_${p.id}`) : ['kubbus', 'romali'];
       const targetCol = col || pCols[0] || 'kubbus';
@@ -1214,8 +1250,9 @@ export const CreateOrderPage: React.FC = () => {
           Boolean(custObj?.phone && custObj.phone.replace(/[^0-9]/g, '').includes(q.replace(/[^0-9]/g, '')))
         );
       });
-      if (matched && matched.customerId) {
-        setSelectedCustomerId(matched.customerId);
+      if (matched) {
+        if (matched.customerId) setSelectedCustomerId(matched.customerId);
+        setSelectedRowId(matched.rowId);
       }
     }
   }, [searchQuery, visibleRows, customers]);
@@ -1289,10 +1326,11 @@ export const CreateOrderPage: React.FC = () => {
     const targetRow = rows.find((r) => r.rowId === rowId);
     if (targetRow && targetRow.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(rowId)) {
       setSelfOrderModalRow(targetRow);
-      setSelfOrderPendingField(field === 'romaliQty' ? 'romali' : field === 'cashAmount' ? 'cash' : field === 'gpayAmount' ? 'gpay' : 'kubbus');
+      setSelfOrderPendingField(field === 'romaliQty' ? 'romali' : field === 'cashAmount' ? 'cash' : field === 'gpayAmount' ? 'gpay' : field === 'discountAmount' ? 'discount' : 'kubbus');
       return;
     }
 
+    lastUserInputTimeRef.current = Date.now();
     setRows((prev) =>
       prev.map((r) => {
         if (r.rowId === rowId) {
@@ -1311,6 +1349,7 @@ export const CreateOrderPage: React.FC = () => {
               productQuantities: updated.productQuantities,
               cashAmount: updated.cashAmount,
               gpayAmount: updated.gpayAmount,
+              discountAmount: updated.discountAmount,
               updatedAt: Date.now(),
             });
           }
@@ -1323,6 +1362,7 @@ export const CreateOrderPage: React.FC = () => {
 
   // Dynamic Product Quantity Change Handler
   const handleProductQtyChange = (rowId: string, productId: string, value: string) => {
+    lastUserInputTimeRef.current = Date.now();
     const targetRow = rows.find((r) => r.rowId === rowId);
     if (targetRow && targetRow.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(rowId)) {
       setSelfOrderModalRow(targetRow);
@@ -1363,6 +1403,7 @@ export const CreateOrderPage: React.FC = () => {
               productQuantities: updated.productQuantities,
               cashAmount: updated.cashAmount,
               gpayAmount: updated.gpayAmount,
+              discountAmount: updated.discountAmount,
               updatedAt: Date.now(),
             });
           }
@@ -1414,6 +1455,7 @@ export const CreateOrderPage: React.FC = () => {
             productQuantities: updated.productQuantities,
             cashAmount: updated.cashAmount,
             gpayAmount: updated.gpayAmount,
+            discountAmount: updated.discountAmount,
             updatedAt: Date.now(),
           });
           return updated;
@@ -1465,9 +1507,11 @@ export const CreateOrderPage: React.FC = () => {
 
     const cash = parseFloat(row.cashAmount) || 0;
     const gpay = parseFloat(row.gpayAmount) || 0;
+    const discount = parseFloat(row.discountAmount) || 0;
     const rowPaid = cash + gpay;
     const prevDue = parseFloat(row.customerBalance || '0') || 0;
-    const rowBalance = prevDue + rowTotal - rowPaid;
+    const netBill = Math.max(0, rowTotal - discount);
+    const rowBalance = prevDue + netBill - rowPaid;
 
     return {
       kQty,
@@ -1475,16 +1519,77 @@ export const CreateOrderPage: React.FC = () => {
       kPrice,
       rPrice,
       rowTotal,
+      netBill,
       cash,
       gpay,
+      discount,
       rowPaid,
       prevDue,
       rowBalance,
       hasOrder,
       totalPieces,
       itemQuantities,
-      isValid: Boolean(row.customerId) && (hasOrder || cash > 0 || gpay > 0),
+      isValid: Boolean(row.customerId) && (hasOrder || cash > 0 || gpay > 0 || discount > 0),
     };
+  };
+
+  const handleSavePrevDue = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!prevDueRow) return;
+
+    const val = parseFloat(prevDueAmount.trim() || '0');
+    if (isNaN(val) || val < 0) {
+      setPrevDueError('Please enter a valid positive amount.');
+      return;
+    }
+
+    const formattedAmount = val.toFixed(2);
+    const targetRow = prevDueRow;
+    const fin = getRowFinancials(targetRow);
+    const todayUnpaid = targetRow.orderId ? Math.max(0, fin.netBill - fin.rowPaid) : 0;
+    const targetTotalBalance = (val + todayUnpaid).toFixed(2);
+
+    // 1. Update in rows state immediately so today's sheet, previous due, and balance due update dynamically live
+    setRows((prev) =>
+      prev.map((r) =>
+        r.rowId === targetRow.rowId || (targetRow.customerId && r.customerId === targetRow.customerId)
+          ? { ...r, customerBalance: formattedAmount }
+          : r
+      )
+    );
+
+    // 2. Also update in customers state for software display
+    if (targetRow.customerId) {
+      setCustomers((prev) =>
+        prev.map((c) => (c.id === targetRow.customerId ? { ...c, current_balance: targetTotalBalance } : c))
+      );
+    }
+
+    setSuccessBanner(`Previous Due for "${targetRow.customerName || 'shop'}" updated to ${formatCurrency(formattedAmount)}!`);
+    setTimeout(() => setSuccessBanner(null), 3000);
+    setIsPrevDueModalOpen(false);
+
+    // 3. Persist automatically & dynamically to backend database!
+    if (targetRow.customerId) {
+      try {
+        await customerService.setBalance(targetRow.customerId, targetTotalBalance);
+      } catch (err) {
+        console.warn('Direct setBalance failed, trying credit adjustment fallback:', err);
+        try {
+          const oldBal = parseFloat(targetRow.customerBalance || '0');
+          const delta = (val - oldBal).toFixed(2);
+          if (parseFloat(delta) !== 0) {
+            await creditService.recordAdjustment({
+              customer_id: targetRow.customerId,
+              amount: delta,
+              notes: `Previous due set to ₹${formattedAmount} from Fast Wholesale Entry`,
+            });
+          }
+        } catch (fallbackErr) {
+          console.error('Failed to persist previous due to database:', fallbackErr);
+        }
+      }
+    }
   };
 
   // Select customer for a custom row or existing row
@@ -1585,6 +1690,8 @@ export const CreateOrderPage: React.FC = () => {
           order = await orderService.updateOrder(row.orderId, {
             items,
             driver_id: assignedDriverId,
+            shop_expense: fin.discount > 0 ? fin.discount.toFixed(2) : '0.00',
+            shop_expense_notes: fin.discount > 0 ? 'Discount / Deduction' : '',
             notes: 'Fast wholesale daily entry (updated)',
           });
         } else {
@@ -1594,6 +1701,8 @@ export const CreateOrderPage: React.FC = () => {
             order_date: orderDate,
             order_number: row.orderNumber?.trim() || undefined,
             items,
+            shop_expense: fin.discount > 0 ? fin.discount.toFixed(2) : undefined,
+            shop_expense_notes: fin.discount > 0 ? 'Discount / Deduction' : undefined,
             notes: 'Fast wholesale daily entry',
           });
         }
@@ -1605,6 +1714,7 @@ export const CreateOrderPage: React.FC = () => {
           amount: fin.cash.toFixed(2),
           payment_method: 'CASH',
           order_id: order?.id || row.orderId,
+          received_at: `${orderDate}T12:00:00Z`,
           notes: order ? `Cash collection for Order #${order.order_number}` : 'Wholesale counter cash payment',
         });
       }
@@ -1615,6 +1725,7 @@ export const CreateOrderPage: React.FC = () => {
           amount: fin.gpay.toFixed(2),
           payment_method: 'GPAY_UPI',
           order_id: order?.id || row.orderId,
+          received_at: `${orderDate}T12:00:00Z`,
           notes: order ? `GPay collection for Order #${order.order_number}` : 'Wholesale counter GPay payment',
         });
       }
@@ -1639,6 +1750,12 @@ export const CreateOrderPage: React.FC = () => {
       // Clear draft on successful database persistence
       if (row.customerId) {
         draftOrderStorage.clearDraft(orderDate, row.customerId);
+        try {
+          const updatedCust = await customerService.getCustomer(row.customerId);
+          setCustomers((prev) => prev.map((c) => (c.id === updatedCust.id ? updatedCust : c)));
+        } catch {
+          // ignore background customer refresh failure
+        }
       }
 
       setSuccessBanner(`Saved order for ${row.customerName} successfully!`);
@@ -1741,6 +1858,7 @@ export const CreateOrderPage: React.FC = () => {
         productQuantities: {},
         cashAmount: '',
         gpayAmount: '',
+        discountAmount: '',
         status: 'IDLE',
         isCustomRow: true,
       };
@@ -1758,6 +1876,8 @@ export const CreateOrderPage: React.FC = () => {
 
     setShowSearchDropdown(false);
     setSelectedCustomerId(custId);
+    const mRow = rows.find((r) => r.customerId === custId);
+    if (mRow) setSelectedRowId(mRow.rowId);
     setSearchQuery(custName);
 
     // Fetch and ensure customer rates are loaded
@@ -1836,9 +1956,9 @@ export const CreateOrderPage: React.FC = () => {
           : routeDriver?.driver_name,
         kubbusQty: '',
         romaliQty: '',
-        shopExpense: '',
         cashAmount: '',
         gpayAmount: '',
+        discountAmount: '',
         status: 'IDLE',
       };
     });
@@ -1856,7 +1976,7 @@ export const CreateOrderPage: React.FC = () => {
     return rows.reduce(
       (acc, row) => {
         const fin = getRowFinancials(row);
-        if (fin.hasOrder || fin.cash > 0 || fin.gpay > 0) {
+        if (fin.hasOrder || fin.cash > 0 || fin.gpay > 0 || fin.discount > 0) {
           acc.validShopsCount += 1;
           acc.totalKubbus += fin.kQty;
           acc.totalRomali += fin.rQty;
@@ -1867,6 +1987,7 @@ export const CreateOrderPage: React.FC = () => {
           acc.totalBill += fin.rowTotal;
           acc.totalCash += fin.cash;
           acc.totalGPay += fin.gpay;
+          acc.totalDiscount += fin.discount;
           acc.totalDue += fin.rowBalance;
         }
         return acc;
@@ -1880,16 +2001,68 @@ export const CreateOrderPage: React.FC = () => {
         totalBill: 0,
         totalCash: 0,
         totalGPay: 0,
+        totalDiscount: 0,
         totalDue: 0,
       }
     );
   }, [rows, products, pricingCache, defaultKubbusPrice, defaultRomaliPrice, getProductPriceForCustomer]);
 
+  // Downside Route & Filtered Statistics (calculates totals for current route / filtered view)
+  const filteredStats = useMemo(() => {
+    const productTotals: Record<string, number> = {};
+    products.forEach((p) => {
+      productTotals[p.id] = 0;
+    });
+
+    return visibleRows.reduce(
+      (acc, row) => {
+        const fin = getRowFinancials(row);
+        if (fin.hasOrder || fin.cash > 0 || fin.gpay > 0 || fin.discount > 0) {
+          acc.validShopsCount += 1;
+        }
+        acc.totalKubbus += fin.kQty;
+        acc.totalRomali += fin.rQty;
+        acc.totalPieces += fin.totalPieces;
+        products.forEach((p) => {
+          acc.productTotals[p.id] = (acc.productTotals[p.id] || 0) + (fin.itemQuantities[p.id] || 0);
+        });
+        acc.totalBill += fin.rowTotal;
+        acc.totalCash += fin.cash;
+        acc.totalGPay += fin.gpay;
+        acc.totalDiscount += fin.discount;
+        acc.totalDue += fin.rowBalance;
+        acc.totalPrevDue += fin.prevDue;
+        return acc;
+      },
+      {
+        validShopsCount: 0,
+        totalKubbus: 0,
+        totalRomali: 0,
+        totalPieces: 0,
+        productTotals,
+        totalBill: 0,
+        totalCash: 0,
+        totalGPay: 0,
+        totalDiscount: 0,
+        totalDue: 0,
+        totalPrevDue: 0,
+      }
+    );
+  }, [visibleRows, products, pricingCache, defaultKubbusPrice, defaultRomaliPrice, getProductPriceForCustomer]);
+
+  const selectedRouteObj = useMemo(() => {
+    if (routeFilter === 'ALL') return null;
+    return routes.find((r) => r.id === routeFilter) || null;
+  }, [routes, routeFilter]);
+
+  const isFilterActive = routeFilter !== 'ALL' || Boolean(searchQuery.trim()) || sourceFilter !== 'ALL' || showOrdersOnly;
+  const shouldShowDownside = routeFilter !== 'ALL' || isFilterActive || showDownsideSummary;
+
   // Count unsubmitted / modified orders ready to submit
   const pendingOrdersCount = useMemo(() => {
     return rows.filter((r) => {
       const fin = getRowFinancials(r);
-      return (fin.hasOrder || fin.cash > 0 || fin.gpay > 0) && (r.status === 'IDLE' || r.status === 'SAVING');
+      return (fin.hasOrder || fin.cash > 0 || fin.gpay > 0 || fin.discount > 0) && (r.status === 'IDLE' || r.status === 'SAVING');
     }).length;
   }, [rows, products, pricingCache, defaultKubbusPrice, defaultRomaliPrice, getProductPriceForCustomer]);
 
@@ -1899,31 +2072,47 @@ export const CreateOrderPage: React.FC = () => {
     return customers.filter((c) => !existingIds.has(c.id)).length;
   }, [rows, customers]);
 
-  // Dynamic Product Column Sequence for Fast Order Entry (Kubbus -> Romali -> Next Shop)
+  // Dynamic Product Column Sequence for Fast Order Entry
   const getProductCols = useCallback((): string[] => {
     return products.length > 0 ? products.map((p) => `prod_${p.id}`) : ['kubbus', 'romali'];
+  }, [products]);
+
+  // Dynamic Entry Product Columns (skips products marked skip_in_entry, e.g. Bun)
+  const getEntryProductCols = useCallback((): string[] => {
+    if (products.length > 0) {
+      const activeEntryProds = products.filter((p) => {
+        if (p.skip_in_entry !== undefined) return !p.skip_in_entry;
+        const nameLower = (p.name || '').toLowerCase();
+        const codeLower = (p.code || '').toLowerCase();
+        return !nameLower.includes('bun') && !codeLower.includes('bun');
+      });
+      return activeEntryProds.length > 0
+        ? activeEntryProds.map((p) => `prod_${p.id}`)
+        : products.map((p) => `prod_${p.id}`);
+    }
+    return ['kubbus', 'romali'];
   }, [products]);
 
   // Dynamic Column Sequence for Keyboard Navigation
   const getColSequence = useCallback((): string[] => {
     const pCols = getProductCols();
-    return [...pCols, 'cash', 'gpay'];
-  }, [getProductCols]);
+    return isOrderDiscountEnabled
+      ? [...pCols, 'cash', 'gpay', 'discount']
+      : [...pCols, 'cash', 'gpay'];
+  }, [getProductCols, isOrderDiscountEnabled]);
 
   /**
    * Full Keyboard Order Entry Navigation:
-   * Enter / Tab on products:
-   *   - Kubbus -> Romali Roti -> Next Product -> Next Shop's Kubbus!
+   * Enter key flow:
+   *   - Kubbus -> Romali Roti -> (skips Bun/other skipped products) -> Cash -> GPay -> Next Shop's Kubbus!
    *   - At the bottom of the list or filtered view: jumps to Search Bar for next customer
-   * Enter / Tab on Cash:
-   *   - Cash -> GPay -> Next Shop's Cash / First Product
+   * Tab key:
+   *   - Full sequential traversal through all columns (including Bun)
    * Shift + Tab:
-   *   - Moves backwards between products / shops
+   *   - Moves backwards between columns / shops
    * Arrow Up / Down:
    *   - Jumps vertically between shops on the same column
    *   - ArrowUp at row 0 jumps directly to Customer Search Bar
-   * Arrow Left / Right:
-   *   - Jumps horizontally between columns (Kubbus <-> Romali <-> Cash <-> GPay)
    * Escape / F2:
    *   - Immediately returns focus to Customer Search Bar
    */
@@ -1947,13 +2136,63 @@ export const CreateOrderPage: React.FC = () => {
       return;
     }
 
-    if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const entryProds = getEntryProductCols();
+      const firstEntryCol = entryProds.length > 0 ? entryProds[0] : (prodCols[0] || 'kubbus');
+
+      // 1. If user is on a product column:
+      if (isProdCol) {
+        const entryIdx = entryProds.indexOf(col);
+        if (entryIdx >= 0 && entryIdx < entryProds.length - 1) {
+          // Move to next entry product within the same shop: Kubbus -> Romali
+          focusCell(visibleIndex, entryProds[entryIdx + 1]);
+        } else {
+          // On last active product (or skipped product like Bun): Jump directly to Cash!
+          focusCell(visibleIndex, 'cash');
+        }
+        return;
+      }
+
+      // 2. If user is on cash: move to GPay
+      if (col === 'cash') {
+        focusCell(visibleIndex, 'gpay');
+        return;
+      }
+
+      // 3. If user is on gpay: move to discount (if enabled) OR jump to NEXT SHOP's first product!
+      if (col === 'gpay') {
+        if (isOrderDiscountEnabled) {
+          focusCell(visibleIndex, 'discount');
+        } else if (visibleIndex < visibleRows.length - 1) {
+          focusCell(visibleIndex + 1, firstEntryCol);
+        } else if (searchInputRef.current) {
+          searchInputRef.current.focus();
+          searchInputRef.current.select();
+        }
+        return;
+      }
+
+      // 4. If user is on discount: jump to NEXT SHOP's first product!
+      if (col === 'discount') {
+        if (visibleIndex < visibleRows.length - 1) {
+          focusCell(visibleIndex + 1, firstEntryCol);
+        } else if (searchInputRef.current) {
+          searchInputRef.current.focus();
+          searchInputRef.current.select();
+        }
+        return;
+      }
+      return;
+    }
+
+    if (e.key === 'Tab' && !e.shiftKey) {
       e.preventDefault();
       if (colIdx >= 0 && colIdx < colSeq.length - 1) {
-        // Move to next column of the same shop: Kubbus -> Romali -> Cash -> GPay!
+        // Move to next column of the same shop: Kubbus -> Romali -> Cash -> GPay -> Disc
         focusCell(visibleIndex, colSeq[colIdx + 1]);
       } else if (colIdx === colSeq.length - 1) {
-        // From GPay (end of current shop) -> jump to NEXT SHOP's first product (Kubbus)!
+        // From end of current shop -> jump to NEXT SHOP's first product (Kubbus)!
         if (visibleIndex < visibleRows.length - 1) {
           focusCell(visibleIndex + 1, colSeq[0]);
         } else {
@@ -2104,6 +2343,7 @@ export const CreateOrderPage: React.FC = () => {
       romaliQty: '',
       cashAmount: '',
       gpayAmount: '',
+      discountAmount: '',
       status: 'IDLE',
       isCustomRow: true,
     };
@@ -2125,6 +2365,7 @@ export const CreateOrderPage: React.FC = () => {
           productQuantities: {},
           cashAmount: '',
           gpayAmount: '',
+          discountAmount: '',
           status: 'IDLE',
           errorMessage: undefined,
         }))
@@ -2172,13 +2413,29 @@ export const CreateOrderPage: React.FC = () => {
       setRows((prev) =>
         prev.map((r) => {
           const match = r.customerId ? latestOrderMap[r.customerId] : null;
-          if (match) {
+          if (match && r.customerId) {
             filledCount++;
+            const nextKubbus = match.kubbusQty > 0 ? String(match.kubbusQty) : r.kubbusQty;
+            const nextRomali = match.romaliQty > 0 ? String(match.romaliQty) : r.romaliQty;
+            const nextProdQtys = { ...(r.productQuantities || {}), ...match.productQuantities };
+
+            draftOrderStorage.saveDraft({
+              customerId: r.customerId,
+              orderDate,
+              kubbusQty: nextKubbus,
+              romaliQty: nextRomali,
+              productQuantities: nextProdQtys,
+              cashAmount: r.cashAmount,
+              gpayAmount: r.gpayAmount,
+              discountAmount: r.discountAmount,
+              updatedAt: Date.now(),
+            });
+
             return {
               ...r,
-              kubbusQty: match.kubbusQty > 0 ? String(match.kubbusQty) : r.kubbusQty,
-              romaliQty: match.romaliQty > 0 ? String(match.romaliQty) : r.romaliQty,
-              productQuantities: { ...(r.productQuantities || {}), ...match.productQuantities },
+              kubbusQty: nextKubbus,
+              romaliQty: nextRomali,
+              productQuantities: nextProdQtys,
               status: 'IDLE',
             };
           }
@@ -2228,11 +2485,26 @@ export const CreateOrderPage: React.FC = () => {
             ? autoProductQtys[romaliProduct.id]
             : autoRomaliQty.trim();
 
+          const finalKubbus = kVal !== '' ? kVal : r.kubbusQty;
+          const finalRomali = rVal !== '' ? rVal : r.romaliQty;
+
+          draftOrderStorage.saveDraft({
+            customerId: r.customerId,
+            orderDate,
+            kubbusQty: finalKubbus,
+            romaliQty: finalRomali,
+            productQuantities: nextProdQtys,
+            cashAmount: r.cashAmount,
+            gpayAmount: r.gpayAmount,
+            discountAmount: r.discountAmount,
+            updatedAt: Date.now(),
+          });
+
           return {
             ...r,
             productQuantities: nextProdQtys,
-            kubbusQty: kVal !== '' ? kVal : r.kubbusQty,
-            romaliQty: rVal !== '' ? rVal : r.romaliQty,
+            kubbusQty: finalKubbus,
+            romaliQty: finalRomali,
             status: 'IDLE',
           };
         }
@@ -2257,6 +2529,19 @@ export const CreateOrderPage: React.FC = () => {
         filledCount++;
         const randK = kPresets[Math.floor(Math.random() * kPresets.length)];
         const randR = rPresets[Math.floor(Math.random() * rPresets.length)];
+
+        draftOrderStorage.saveDraft({
+          customerId: r.customerId,
+          orderDate,
+          kubbusQty: String(randK),
+          romaliQty: String(randR),
+          productQuantities: r.productQuantities,
+          cashAmount: r.cashAmount,
+          gpayAmount: r.gpayAmount,
+          discountAmount: r.discountAmount,
+          updatedAt: Date.now(),
+        });
+
         return {
           ...r,
           kubbusQty: String(randK),
@@ -2318,7 +2603,7 @@ export const CreateOrderPage: React.FC = () => {
             d.is_active
         );
 
-        const assignedDriverId = row.driverId || routeDriver?.id || null;
+        const assignedDriverId = autoConfirmDriver ? (row.driverId || routeDriver?.id || null) : null;
 
         const items: Array<{ product_id: string; quantity: number; unit_price: string }> = [];
         const activeProducts = products.length > 0 ? products : [
@@ -2352,6 +2637,8 @@ export const CreateOrderPage: React.FC = () => {
             order = await orderService.updateOrder(row.orderId, {
               items,
               driver_id: assignedDriverId,
+              shop_expense: fin.discount > 0 ? fin.discount.toFixed(2) : '0.00',
+              shop_expense_notes: fin.discount > 0 ? 'Discount / Deduction' : '',
               notes: 'Fast wholesale daily entry (updated)',
             });
           } else {
@@ -2361,6 +2648,8 @@ export const CreateOrderPage: React.FC = () => {
               order_date: orderDate,
               order_number: row.orderNumber?.trim() || undefined,
               items,
+              shop_expense: fin.discount > 0 ? fin.discount.toFixed(2) : undefined,
+              shop_expense_notes: fin.discount > 0 ? 'Discount / Deduction' : undefined,
               notes: 'Fast wholesale daily entry',
             });
           }
@@ -2373,6 +2662,7 @@ export const CreateOrderPage: React.FC = () => {
             amount: fin.cash.toFixed(2),
             payment_method: 'CASH',
             order_id: order?.id || row.orderId,
+            received_at: `${orderDate}T12:00:00Z`,
             notes: order ? `Cash collection for Order #${order.order_number}` : 'Wholesale counter cash payment',
           });
         }
@@ -2384,6 +2674,7 @@ export const CreateOrderPage: React.FC = () => {
             amount: fin.gpay.toFixed(2),
             payment_method: 'GPAY_UPI',
             order_id: order?.id || row.orderId,
+            received_at: `${orderDate}T12:00:00Z`,
             notes: order ? `GPay collection for Order #${order.order_number}` : 'Wholesale counter GPay payment',
           });
         }
@@ -2430,9 +2721,15 @@ export const CreateOrderPage: React.FC = () => {
     setIsSubmittingAll(false);
     setSubmitProgress(null);
 
-    // Re-sync rows from the database source of truth
-    if (customers.length > 0) {
-      await loadOrdersForDate(orderDate, customers, drivers);
+    // Re-sync rows from the database source of truth with freshly calculated balances
+    try {
+      const refreshedCusts = await customerService.getCustomers(undefined, undefined, true);
+      setCustomers(refreshedCusts);
+      await loadOrdersForDate(orderDate, refreshedCusts, drivers);
+    } catch {
+      if (customers.length > 0) {
+        await loadOrdersForDate(orderDate, customers, drivers);
+      }
     }
 
     if (successCount > 0) {
@@ -2492,6 +2789,8 @@ export const CreateOrderPage: React.FC = () => {
       });
 
       const parsedListOrder = newCustListOrder.trim() ? parseInt(newCustListOrder.trim(), 10) : undefined;
+      const parsedOpeningDue = parseFloat(newCustOpeningBalance.trim() || '0');
+      const openingBalanceStr = !isNaN(parsedOpeningDue) && parsedOpeningDue > 0 ? parsedOpeningDue.toFixed(2) : undefined;
 
       const created = await customerService.createCustomer({
         name: newCustName.trim(),
@@ -2501,13 +2800,19 @@ export const CreateOrderPage: React.FC = () => {
         route: newCustRoute,
         notes: parsedListOrder ? `[Stop #${parsedListOrder}]` : undefined,
         product_prices: product_prices.length > 0 ? product_prices : undefined,
+        opening_balance: openingBalanceStr,
       });
 
       let initialBalance = created.current_balance || '0.00';
-      const parsedOpeningDue = parseFloat(newCustOpeningBalance.trim() || '0');
-      if (!isNaN(parsedOpeningDue) && parsedOpeningDue > 0) {
-        initialBalance = parsedOpeningDue.toFixed(2);
+      if (openingBalanceStr) {
+        initialBalance = openingBalanceStr;
         created.current_balance = initialBalance;
+        // Ensure balance is committed to DB if not set during creation
+        try {
+          await customerService.setBalance(created.id, openingBalanceStr, 'Initial shop opening balance');
+        } catch {
+          // ignore if already set
+        }
       }
 
       setCustomers((prev) => [created, ...prev]);
@@ -2559,6 +2864,7 @@ export const CreateOrderPage: React.FC = () => {
         productQuantities: initialProductQuantities,
         cashAmount: '',
         gpayAmount: '',
+        discountAmount: '',
         status: 'IDLE',
         orderNumber: newCustOrderNumber.trim() || undefined,
         listOrder: parsedListOrder,
@@ -2585,6 +2891,7 @@ export const CreateOrderPage: React.FC = () => {
           productQuantities: initialProductQuantities,
           cashAmount: '',
           gpayAmount: '',
+          discountAmount: '',
           updatedAt: Date.now(),
         });
       }
@@ -2652,34 +2959,36 @@ export const CreateOrderPage: React.FC = () => {
 
         <div style={{ display: 'flex', gap: '0.3rem', alignItems: 'center', flexWrap: 'wrap' }}>
           {/* Driver Confirmation Toggle */}
-          <label
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '0.3rem',
-              cursor: 'pointer',
-              fontSize: '0.76rem',
-              fontWeight: 700,
-              color: autoConfirmDriver ? '#dc2626' : 'var(--text-secondary)',
-              background: autoConfirmDriver ? '#fee2e2' : 'var(--bg-card)',
-              border: autoConfirmDriver ? '1.5px solid #dc2626' : '1px solid var(--border)',
-              padding: '0 0.5rem',
-              borderRadius: '6px',
-              height: '28px',
-              userSelect: 'none',
-              transition: 'all 0.15s ease',
-            }}
-            title="Automatically assign and confirm orders to route drivers on submit"
-          >
-            <input
-              type="checkbox"
-              checked={autoConfirmDriver}
-              onChange={(e) => setAutoConfirmDriver(e.target.checked)}
-              style={{ accentColor: '#dc2626', width: '13px', height: '13px', cursor: 'pointer' }}
-            />
-            <Truck size={13} color={autoConfirmDriver ? '#dc2626' : 'var(--text-muted)'} />
-            <span>Confirm to Driver</span>
-          </label>
+          {isDriverModuleEnabled && (
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.3rem',
+                cursor: 'pointer',
+                fontSize: '0.76rem',
+                fontWeight: 700,
+                color: autoConfirmDriver ? '#dc2626' : 'var(--text-secondary)',
+                background: autoConfirmDriver ? '#fee2e2' : 'var(--bg-card)',
+                border: autoConfirmDriver ? '1.5px solid #dc2626' : '1px solid var(--border)',
+                padding: '0 0.5rem',
+                borderRadius: '6px',
+                height: '28px',
+                userSelect: 'none',
+                transition: 'all 0.15s ease',
+              }}
+              title="Automatically assign and confirm orders to route drivers on submit"
+            >
+              <input
+                type="checkbox"
+                checked={autoConfirmDriver}
+                onChange={(e) => setAutoConfirmDriver(e.target.checked)}
+                style={{ accentColor: '#dc2626', width: '13px', height: '13px', cursor: 'pointer' }}
+              />
+              <Truck size={13} color={autoConfirmDriver ? '#dc2626' : 'var(--text-muted)'} />
+              <span>Confirm to Driver</span>
+            </label>
+          )}
 
           <button
             type="button"
@@ -2874,6 +3183,9 @@ export const CreateOrderPage: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.62rem', color: 'var(--text-muted)', paddingLeft: '0.15rem' }}>
               <span>Cash: <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{formatCurrency(sheetStats.totalCash)}</strong></span>
               <span>GPay: <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{formatCurrency(sheetStats.totalGPay)}</strong></span>
+              {isOrderDiscountEnabled && sheetStats.totalDiscount > 0 && (
+                <span>Disc: <strong style={{ color: '#b45309', fontWeight: 600 }}>{formatCurrency(sheetStats.totalDiscount)}</strong></span>
+              )}
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>Balance Due:</span>
@@ -2883,19 +3195,20 @@ export const CreateOrderPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. Compact Filter Bar - Single stream without wasted vertical space */}
+      {/* 3. Compact Filter Bar - Ultra-clean responsive toolbar */}
       <div
         className="billing-filter-bar"
         style={{
           display: 'flex',
-          gap: '0.25rem',
+          gap: '0.35rem',
           alignItems: 'center',
-          flexWrap: 'nowrap',
-          overflowX: 'auto',
-          overflowY: 'hidden',
-          marginBottom: '0.2rem',
+          flexWrap: 'wrap',
+          marginBottom: '0.35rem',
           flexShrink: 0,
-          scrollbarWidth: 'none',
+          background: 'var(--bg-card)',
+          padding: '0.35rem 0.55rem',
+          borderRadius: '8px',
+          border: '1px solid var(--border)',
         }}
       >
         {/* Route Select */}
@@ -2922,14 +3235,12 @@ export const CreateOrderPage: React.FC = () => {
           })}
         </select>
 
-        {/* Date Selector (Changing this re-queries the database for that date!) */}
-        <input
-          type="date"
-          className="form-input"
-          style={{ width: '112px', flex: '0 0 auto', height: '28px', padding: '0 0.35rem', fontSize: '0.74rem' }}
+        {/* Date Selector - Guaranteed DD/MM/YYYY on all devices and locales */}
+        <UniversalDatePicker
           value={orderDate}
-          onChange={(e) => handleDateChange(e.target.value)}
-          title="Select dispatch date to load or enter orders"
+          onChange={(newDate) => handleDateChange(newDate)}
+          style={{ width: '118px', height: '28px' }}
+          title="Dispatch Date (DD/MM/YYYY) — Changing this re-queries the database for that date"
         />
 
         {/* Order Sorting Dropdown - Small, side-by-side with Route and Date */}
@@ -3055,7 +3366,15 @@ export const CreateOrderPage: React.FC = () => {
         <button
           type="button"
           className="btn btn-secondary btn-sm"
-          onClick={() => loadOrdersForDate(orderDate, customers, drivers, false)}
+          onClick={async () => {
+            try {
+              const freshCusts = await customerService.getCustomers(undefined, undefined, true);
+              setCustomers(freshCusts);
+              await loadOrdersForDate(orderDate, freshCusts, drivers, false);
+            } catch {
+              await loadOrdersForDate(orderDate, customers, drivers, false);
+            }
+          }}
           disabled={ordersLoading || isSyncing}
           style={{ height: '28px', padding: '0 0.5rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontWeight: 600, fontSize: '0.74rem', flex: '0 0 auto' }}
           title={`Click to refresh orders. Last refreshed: ${lastUpdatedTime}`}
@@ -3830,18 +4149,21 @@ export const CreateOrderPage: React.FC = () => {
                 )}
                 <th style={{ width: '38px', minWidth: '36px', textAlign: 'center', padding: '0.35rem 0.25rem' }}>#</th>
                 <th style={{ minWidth: '180px', maxWidth: '240px', padding: '0.35rem 0.55rem' }}>Shop Name</th>
-                <th style={{ minWidth: '110px', padding: '0.35rem 0.55rem' }}>Route & Driver</th>
+                <th style={{ minWidth: '110px', padding: '0.35rem 0.55rem' }}>Route & Staff Driver</th>
                 <th style={{ minWidth: '80px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }}>Prev. Due</th>
                 {products.length > 0 ? (
-                  products.map((p) => (
-                    <th
-                      key={p.id}
-                      style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}
-                      title={`${p.name} (Unit price: ₹${parseFloat(p.unit_price).toFixed(2)})`}
-                    >
-                      {p.name} ({p.packet_size ? p.packet_size : 'ps'})
-                    </th>
-                  ))
+                  products.map((p) => {
+                    const isSkipped = p.skip_in_entry || (p.skip_in_entry === undefined && (p.name.toLowerCase().includes('bun') || p.code.toLowerCase().includes('bun')));
+                    return (
+                      <th
+                        key={p.id}
+                        style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}
+                        title={`${p.name} (Unit price: ₹${parseFloat(p.unit_price).toFixed(2)})${isSkipped ? ' • Skipped on Enter' : ''}`}
+                      >
+                        {p.name} ({p.packet_size ? p.packet_size : 'ps'})
+                      </th>
+                    );
+                  })
                 ) : (
                   <>
                     <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>Kubbus (ps)</th>
@@ -3851,7 +4173,10 @@ export const CreateOrderPage: React.FC = () => {
                 <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>Cash (₹)</th>
                 <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }}>GPay (₹)</th>
                 <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }}>Bill Total</th>
-                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }} title="Total Balance = Prev. Due + Today's Bill - Today's Payments">Balance</th>
+                {isOrderDiscountEnabled && (
+                  <th style={{ minWidth: '82px', textAlign: 'right', padding: '0.35rem 0.4rem', whiteSpace: 'nowrap' }} title="Discount / Deduction in ₹">Disc (₹)</th>
+                )}
+                <th style={{ minWidth: '88px', textAlign: 'right', padding: '0.35rem 0.55rem', whiteSpace: 'nowrap' }} title="Total Balance = Prev. Due + Today's Net Bill - Today's Payments">Balance</th>
                 <th style={{ width: '82px', minWidth: '78px', textAlign: 'center', padding: '0.35rem 0.4rem' }}>Status</th>
                 <th style={{ width: '40px', minWidth: '36px', textAlign: 'center', padding: '0.35rem 0.25rem' }}>Action</th>
               </tr>
@@ -3859,7 +4184,7 @@ export const CreateOrderPage: React.FC = () => {
             <tbody>
               {loading || (ordersLoading && rows.length === 0) ? (
                 <tr>
-                  <td colSpan={(orderSort === 'CUSTOM' && isCustomEditing ? 10 : 9) + (products.length > 0 ? products.length : 2)} style={{ padding: '3rem', textAlign: 'center' }}>
+                  <td colSpan={(orderSort === 'CUSTOM' && isCustomEditing ? 1 : 0) + (isOrderDiscountEnabled ? 11 : 10) + (products.length > 0 ? products.length : 2)} style={{ padding: '3rem', textAlign: 'center' }}>
                     <div className="spinner" style={{ margin: '0 auto 0.5rem' }} />
                     <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                       Loading orders for {orderDate}...
@@ -3868,7 +4193,7 @@ export const CreateOrderPage: React.FC = () => {
                 </tr>
               ) : visibleRows.length === 0 ? (
                 <tr>
-                  <td colSpan={(orderSort === 'CUSTOM' && isCustomEditing ? 10 : 9) + (products.length > 0 ? products.length : 2)} style={{ padding: '3rem 1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <td colSpan={(orderSort === 'CUSTOM' && isCustomEditing ? 1 : 0) + (isOrderDiscountEnabled ? 11 : 10) + (products.length > 0 ? products.length : 2)} style={{ padding: '3rem 1.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>
                     <div style={{ maxWidth: '420px', margin: '0 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.65rem' }}>
                       <Store size={40} color="var(--primary)" style={{ opacity: 0.8 }} />
                       <div style={{ fontWeight: 800, fontSize: '1.05rem', color: 'var(--text-primary)' }}>
@@ -3899,11 +4224,16 @@ export const CreateOrderPage: React.FC = () => {
                   const isRowActive = fin.hasOrder || fin.cash > 0 || fin.gpay > 0;
                   const isDraggedOver = dragOver === row.rowId;
                   const isBeingDragged = isDragging === row.rowId;
+                  const isSelected = Boolean(
+                    (selectedRowId && row.rowId === selectedRowId) ||
+                    (selectedCustomerId && row.customerId && row.customerId === selectedCustomerId)
+                  );
 
                   return (
                     <tr
                       id={`order-row-${row.customerId || row.rowId}`}
                       key={row.rowId}
+                      className={`order-row ${isSelected ? 'order-row-selected' : ''}`}
                       draggable={orderSort === 'CUSTOM' && isCustomEditing}
                       onDragStart={orderSort === 'CUSTOM' && isCustomEditing ? (e) => {
                         dragRowId.current = row.rowId;
@@ -3950,15 +4280,27 @@ export const CreateOrderPage: React.FC = () => {
                         setDragOver(null);
                       } : undefined}
                       onClick={() => {
-                        if (isWhatsAppEnabled && row.customerId) handleSelectCustomerForWhatsApp(row.customerId);
+                        if (row.customerId && selectedCustomerId !== row.customerId) {
+                          setSelectedCustomerId(row.customerId);
+                          if (isWhatsAppEnabled) handleSelectCustomerForWhatsApp(row.customerId);
+                        }
+                        setSelectedRowId(row.rowId);
+                      }}
+                      onFocusCapture={() => {
+                        if (row.customerId && selectedCustomerId !== row.customerId) {
+                          setSelectedCustomerId(row.customerId);
+                        }
+                        setSelectedRowId(row.rowId);
                       }}
                       style={{
-                        cursor: (orderSort === 'CUSTOM' && isCustomEditing) ? 'grab' : (isWhatsAppEnabled && row.customerId) ? 'pointer' : 'default',
+                        cursor: (orderSort === 'CUSTOM' && isCustomEditing) ? 'grab' : 'pointer',
                         opacity: isBeingDragged ? 0.45 : 1,
                         transition: 'opacity 0.15s, background 0.12s',
                         background:
                           isDraggedOver
                             ? 'rgba(79, 70, 229, 0.10)'
+                            : isSelected
+                            ? '#fef9c3'
                             : (isWhatsAppEnabled && activeCustomer?.id === row.customerId)
                             ? 'rgba(16, 185, 129, 0.12)'
                             : row.orderSource === 'CUSTOMER_LINK'
@@ -3973,6 +4315,8 @@ export const CreateOrderPage: React.FC = () => {
                         borderLeft:
                           isDraggedOver
                             ? '3px solid #4f46e5'
+                            : isSelected
+                            ? '4px solid #eab308'
                             : (isWhatsAppEnabled && activeCustomer?.id === row.customerId)
                             ? '4px solid #059669'
                             : row.orderSource === 'CUSTOMER_LINK'
@@ -4228,14 +4572,44 @@ export const CreateOrderPage: React.FC = () => {
                       </td>
 
                       {/* Route & Driver Badge - compact */}
-                      <td style={{ padding: '0.18rem 0.45rem', minWidth: '105px' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem' }}>
-                          <span className="badge badge-neutral" style={{ fontSize: '0.67rem', padding: '0.06rem 0.35rem', alignSelf: 'flex-start', whiteSpace: 'nowrap' }}>
+                      <td style={{ padding: '0.18rem 0.45rem', minWidth: '105px', maxWidth: '140px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.1rem', minWidth: 0 }}>
+                          <span
+                            className="badge badge-neutral"
+                            style={{
+                              fontSize: '0.67rem',
+                              padding: '0.06rem 0.35rem',
+                              alignSelf: 'flex-start',
+                              whiteSpace: 'nowrap',
+                              maxWidth: '125px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              display: 'inline-block',
+                            }}
+                            title={row.customerRoute || 'No Route'}
+                          >
                             {row.customerRoute || 'No Route'}
                           </span>
-                          {row.driverName && (
-                            <span style={{ fontSize: '0.63rem', color: autoConfirmDriver ? '#047857' : 'var(--text-muted)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap' }} title={`Driver: ${row.driverName}`}>
-                              <Truck size={10} />{row.driverName}
+                          {isDriverModuleEnabled && row.driverName && (
+                            <span
+                              style={{
+                                fontSize: '0.63rem',
+                                color: autoConfirmDriver ? '#047857' : 'var(--text-muted)',
+                                fontWeight: 600,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '2px',
+                                whiteSpace: 'nowrap',
+                                maxWidth: '125px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                              }}
+                              title={`Driver: ${row.driverName}`}
+                            >
+                              <Truck size={10} style={{ flexShrink: 0 }} />
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {row.driverName}
+                              </span>
                             </span>
                           )}
                         </div>
@@ -4313,62 +4687,102 @@ export const CreateOrderPage: React.FC = () => {
                           const effRate = getProductPriceForCustomer(row.customerId, prod);
                           const stdRate = parseFloat(prod.unit_price || '0');
                           const isCustomRate = Boolean(row.customerId) && Math.abs(effRate - stdRate) > 0.001;
+                          const isKubbus = Boolean((kubbusProduct && prod.id === kubbusProduct.id) || prod.name.toLowerCase().startsWith('kubbus'));
+                          const isRomali = Boolean((romaliProduct && prod.id === romaliProduct.id) || prod.name.toLowerCase().startsWith('romali'));
+                          const prodLetter = (prod.name || '').trim().charAt(0).toUpperCase() || (isKubbus ? 'K' : isRomali ? 'R' : 'P');
+
+                          const badgeText = isKubbus ? '#b45309' : isRomali ? '#b91c1c' : '#2563eb';
+                          const badgeBg = isKubbus ? 'rgba(245, 158, 11, 0.15)' : isRomali ? 'rgba(239, 68, 68, 0.15)' : 'rgba(37, 99, 235, 0.12)';
+                          const badgeBorder = isKubbus ? 'rgba(245, 158, 11, 0.35)' : isRomali ? 'rgba(239, 68, 68, 0.35)' : 'rgba(37, 99, 235, 0.3)';
+
+                          const activeBorder = isKubbus ? '#f59e0b' : isRomali ? '#dc2626' : 'var(--primary)';
+                          const activeBg = isKubbus ? '#fffbeb' : isRomali ? '#fef2f2' : 'var(--primary-subtle, #f0fdf4)';
 
                           return (
                             <td key={prod.id} style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
-                              <input
-                                ref={(el) => {
-                                  inputRefs.current[`${index}_prod_${prod.id}`] = el;
-                                  if (row.customerId) {
-                                    inputRefs.current[`cust_${row.customerId}_prod_${prod.id}`] = el;
+                              <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                                <span
+                                  aria-hidden="true"
+                                  style={{
+                                    position: 'absolute',
+                                    left: '5px',
+                                    top: '50%',
+                                    transform: 'translateY(-50%)',
+                                    zIndex: 2,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    width: '15px',
+                                    height: '17px',
+                                    fontSize: '0.66rem',
+                                    fontWeight: 900,
+                                    color: badgeText,
+                                    backgroundColor: badgeBg,
+                                    border: `1px solid ${badgeBorder}`,
+                                    borderRadius: '3px',
+                                    lineHeight: 1,
+                                    pointerEvents: 'none',
+                                    userSelect: 'none',
+                                    boxShadow: '0 0.5px 1px rgba(0,0,0,0.05)',
+                                  }}
+                                  title={`${prod.name} (${prodLetter})`}
+                                >
+                                  {prodLetter}
+                                </span>
+                                <input
+                                  ref={(el) => {
+                                    inputRefs.current[`${index}_prod_${prod.id}`] = el;
+                                    if (row.customerId) {
+                                      inputRefs.current[`cust_${row.customerId}_prod_${prod.id}`] = el;
+                                    }
+                                  }}
+                                  data-col={`prod_${prod.id}`}
+                                  data-customer-id={row.customerId}
+                                  type="number"
+                                  min="0"
+                                  step="1"
+                                  placeholder="0"
+                                  className="form-input"
+                                  value={cellQty}
+                                  readOnly={isLocked}
+                                  onClick={() => {
+                                    if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                      setSelfOrderModalRow(row);
+                                      setSelfOrderPendingField(`prod_${prod.id}`);
+                                    }
+                                  }}
+                                  onFocus={(e) => {
+                                    e.target.select();
+                                    if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                      setSelfOrderModalRow(row);
+                                      setSelfOrderPendingField(`prod_${prod.id}`);
+                                      return;
+                                    }
+                                    if (row.customerId) fetchCustomerPricing(row.customerId);
+                                  }}
+                                  onChange={(e) => handleProductQtyChange(row.rowId, prod.id, e.target.value)}
+                                  onKeyDown={(e) => handleKeyDown(e, index, `prod_${prod.id}`)}
+                                  style={{
+                                    width: '74px',
+                                    height: '28px',
+                                    textAlign: 'right',
+                                    fontWeight: 800,
+                                    padding: '0.15rem 0.35rem 0.15rem 22px',
+                                    fontSize: '0.86rem',
+                                    display: 'inline-block',
+                                    cursor: isLocked ? 'pointer' : 'text',
+                                    borderColor: cellQty ? activeBorder : undefined,
+                                    backgroundColor: isLocked ? '#f9fafb' : cellQty ? activeBg : undefined,
+                                  }}
+                                  title={
+                                    (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                      ? 'Customer Self-Order. Click to unlock and edit.'
+                                      : row.status === 'LOCKED'
+                                      ? 'Order is locked and cannot be edited. Use Reopen to modify.'
+                                      : `${prod.name} • Rate: ₹${effRate.toFixed(2)}${isCustomRate ? ' (Customer Custom)' : ' (Standard)'}`
                                   }
-                                }}
-                                data-col={`prod_${prod.id}`}
-                                data-customer-id={row.customerId}
-                                type="number"
-                                min="0"
-                                step="1"
-                                placeholder="0"
-                                className="form-input"
-                                value={cellQty}
-                                readOnly={isLocked}
-                                onClick={() => {
-                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                                    setSelfOrderModalRow(row);
-                                    setSelfOrderPendingField(`prod_${prod.id}`);
-                                  }
-                                }}
-                                onFocus={(e) => {
-                                  e.target.select();
-                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                                    setSelfOrderModalRow(row);
-                                    setSelfOrderPendingField(`prod_${prod.id}`);
-                                    return;
-                                  }
-                                  if (row.customerId) fetchCustomerPricing(row.customerId);
-                                }}
-                                onChange={(e) => handleProductQtyChange(row.rowId, prod.id, e.target.value)}
-                                onKeyDown={(e) => handleKeyDown(e, index, `prod_${prod.id}`)}
-                                style={{
-                                  width: '72px',
-                                  height: '28px',
-                                  textAlign: 'right',
-                                  fontWeight: 800,
-                                  padding: '0.15rem 0.35rem',
-                                  fontSize: '0.86rem',
-                                  display: 'inline-block',
-                                  cursor: isLocked ? 'pointer' : 'text',
-                                  borderColor: cellQty ? 'var(--primary)' : undefined,
-                                  backgroundColor: isLocked ? '#f9fafb' : cellQty ? 'var(--primary-subtle, #f0fdf4)' : undefined,
-                                }}
-                                title={
-                                  (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                    ? 'Customer Self-Order. Click to unlock and edit.'
-                                    : row.status === 'LOCKED'
-                                    ? 'Order is locked and cannot be edited. Use Reopen to modify.'
-                                    : `${prod.name} • Rate: ₹${effRate.toFixed(2)}${isCustomRate ? ' (Customer Custom)' : ' (Standard)'}`
-                                }
-                              />
+                                />
+                              </div>
                             </td>
                           );
                         })
@@ -4376,138 +4790,198 @@ export const CreateOrderPage: React.FC = () => {
                         <>
                           {/* Fallback Kubbus Input */}
                           <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
-                            <input
-                              ref={(el) => {
-                                inputRefs.current[`${index}_kubbus`] = el;
-                                if (row.customerId) {
-                                  inputRefs.current[`cust_${row.customerId}_kubbus`] = el;
-                                }
-                              }}
-                              data-col="kubbus"
-                              data-customer-id={row.customerId}
-                              type="number"
-                              min="0"
-                              step="1"
-                              placeholder="0"
-                              className="form-input"
-                              value={row.kubbusQty}
-                              readOnly={
-                                (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                              }
-                              onClick={() => {
-                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                                  setSelfOrderModalRow(row);
-                                  setSelfOrderPendingField('kubbus');
-                                }
-                              }}
-                              onFocus={(e) => {
-                                e.target.select();
-                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                                  setSelfOrderModalRow(row);
-                                  setSelfOrderPendingField('kubbus');
-                                  return;
-                                }
-                                if (row.customerId) fetchCustomerPricing(row.customerId);
-                              }}
-                              onChange={(e) => handleCellChange(row.rowId, 'kubbusQty', e.target.value)}
-                              onKeyDown={(e) => handleKeyDown(e, index, 'kubbus')}
-                              style={{
-                                width: '72px',
-                                height: '28px',
-                                textAlign: 'right',
-                                fontWeight: 800,
-                                padding: '0.15rem 0.35rem',
-                                fontSize: '0.86rem',
-                                display: 'inline-block',
-                                cursor: (
+                            <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                              <span
+                                aria-hidden="true"
+                                style={{
+                                  position: 'absolute',
+                                  left: '5px',
+                                  top: '50%',
+                                  transform: 'translateY(-50%)',
+                                  zIndex: 2,
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  width: '15px',
+                                  height: '17px',
+                                  fontSize: '0.66rem',
+                                  fontWeight: 900,
+                                  color: '#b45309',
+                                  backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                                  border: '1px solid rgba(245, 158, 11, 0.35)',
+                                  borderRadius: '3px',
+                                  lineHeight: 1,
+                                  pointerEvents: 'none',
+                                  userSelect: 'none',
+                                  boxShadow: '0 0.5px 1px rgba(0,0,0,0.05)',
+                                }}
+                                title="Kubbus (K)"
+                              >
+                                K
+                              </span>
+                              <input
+                                ref={(el) => {
+                                  inputRefs.current[`${index}_kubbus`] = el;
+                                  if (row.customerId) {
+                                    inputRefs.current[`cust_${row.customerId}_kubbus`] = el;
+                                  }
+                                }}
+                                data-col="kubbus"
+                                data-customer-id={row.customerId}
+                                type="number"
+                                min="0"
+                                step="1"
+                                placeholder="0"
+                                className="form-input"
+                                value={row.kubbusQty}
+                                readOnly={
                                   (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                                   (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                ) ? 'pointer' : 'text',
-                                borderColor: row.kubbusQty ? '#f59e0b' : undefined,
-                                backgroundColor: (
-                                  (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                }
+                                onClick={() => {
+                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                    setSelfOrderModalRow(row);
+                                    setSelfOrderPendingField('kubbus');
+                                  }
+                                }}
+                                onFocus={(e) => {
+                                  e.target.select();
+                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                    setSelfOrderModalRow(row);
+                                    setSelfOrderPendingField('kubbus');
+                                    return;
+                                  }
+                                  if (row.customerId) fetchCustomerPricing(row.customerId);
+                                }}
+                                onChange={(e) => handleCellChange(row.rowId, 'kubbusQty', e.target.value)}
+                                onKeyDown={(e) => handleKeyDown(e, index, 'kubbus')}
+                                style={{
+                                  width: '74px',
+                                  height: '28px',
+                                  textAlign: 'right',
+                                  fontWeight: 800,
+                                  padding: '0.15rem 0.35rem 0.15rem 22px',
+                                  fontSize: '0.86rem',
+                                  display: 'inline-block',
+                                  cursor: (
+                                    (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                    (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                  ) ? 'pointer' : 'text',
+                                  borderColor: row.kubbusQty ? '#f59e0b' : undefined,
+                                  backgroundColor: (
+                                    (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                    (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                  ) ? '#f9fafb' : row.kubbusQty ? '#fffbeb' : undefined,
+                                }}
+                                title={
                                   (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                ) ? '#f9fafb' : row.kubbusQty ? '#fffbeb' : undefined,
-                              }}
-                              title={
-                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                  ? 'Customer Self-Order. Click to unlock and edit.'
-                                  : row.status === 'LOCKED'
-                                  ? 'Order is locked and cannot be edited. Use Reopen to modify.'
-                                  : kubbusProduct
-                                  ? `Kubbus • Rate: ₹${getProductPriceForCustomer(row.customerId, kubbusProduct).toFixed(2)}`
-                                  : 'Kubbus'
-                              }
-                            />
+                                    ? 'Customer Self-Order. Click to unlock and edit.'
+                                    : row.status === 'LOCKED'
+                                    ? 'Order is locked and cannot be edited. Use Reopen to modify.'
+                                    : kubbusProduct
+                                    ? `Kubbus • Rate: ₹${getProductPriceForCustomer(row.customerId, kubbusProduct).toFixed(2)}`
+                                    : 'Kubbus'
+                                }
+                              />
+                            </div>
                           </td>
 
                           {/* Fallback Romali Roti Input */}
                           <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
-                            <input
-                              ref={(el) => {
-                                inputRefs.current[`${index}_romali`] = el;
-                                if (row.customerId) {
-                                  inputRefs.current[`cust_${row.customerId}_romali`] = el;
-                                }
-                              }}
-                              data-col="romali"
-                              data-customer-id={row.customerId}
-                              type="number"
-                              min="0"
-                              step="1"
-                              placeholder="0"
-                              className="form-input"
-                              value={row.romaliQty}
-                              readOnly={
-                                (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
-                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                              }
-                              onClick={() => {
-                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                                  setSelfOrderModalRow(row);
-                                  setSelfOrderPendingField('romali');
-                                }
-                              }}
-                              onFocus={(e) => {
-                                e.target.select();
-                                if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
-                                  setSelfOrderModalRow(row);
-                                  setSelfOrderPendingField('romali');
-                                  return;
-                                }
-                                if (row.customerId) fetchCustomerPricing(row.customerId);
-                              }}
-                              onChange={(e) => handleCellChange(row.rowId, 'romaliQty', e.target.value)}
-                              onKeyDown={(e) => handleKeyDown(e, index, 'romali')}
-                              style={{
-                                width: '72px',
-                                height: '28px',
-                                textAlign: 'right',
-                                fontWeight: 800,
-                                padding: '0.15rem 0.35rem',
-                                fontSize: '0.86rem',
-                                display: 'inline-block',
-                                cursor: (
+                            <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                              <span
+                                aria-hidden="true"
+                                style={{
+                                  position: 'absolute',
+                                  left: '5px',
+                                  top: '50%',
+                                  transform: 'translateY(-50%)',
+                                  zIndex: 2,
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  width: '15px',
+                                  height: '17px',
+                                  fontSize: '0.66rem',
+                                  fontWeight: 900,
+                                  color: '#b91c1c',
+                                  backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                                  border: '1px solid rgba(239, 68, 68, 0.35)',
+                                  borderRadius: '3px',
+                                  lineHeight: 1,
+                                  pointerEvents: 'none',
+                                  userSelect: 'none',
+                                  boxShadow: '0 0.5px 1px rgba(0,0,0,0.05)',
+                                }}
+                                title="Romali Roti (R)"
+                              >
+                                R
+                              </span>
+                              <input
+                                ref={(el) => {
+                                  inputRefs.current[`${index}_romali`] = el;
+                                  if (row.customerId) {
+                                    inputRefs.current[`cust_${row.customerId}_romali`] = el;
+                                  }
+                                }}
+                                data-col="romali"
+                                data-customer-id={row.customerId}
+                                type="number"
+                                min="0"
+                                step="1"
+                                placeholder="0"
+                                className="form-input"
+                                value={row.romaliQty}
+                                readOnly={
                                   (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
                                   (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                ) ? 'pointer' : 'text',
-                                borderColor: row.romaliQty ? '#dc2626' : undefined,
-                                backgroundColor: (
-                                  (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                }
+                                onClick={() => {
+                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                    setSelfOrderModalRow(row);
+                                    setSelfOrderPendingField('romali');
+                                  }
+                                }}
+                                onFocus={(e) => {
+                                  e.target.select();
+                                  if (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId)) {
+                                    setSelfOrderModalRow(row);
+                                    setSelfOrderPendingField('romali');
+                                    return;
+                                  }
+                                  if (row.customerId) fetchCustomerPricing(row.customerId);
+                                }}
+                                onChange={(e) => handleCellChange(row.rowId, 'romaliQty', e.target.value)}
+                                onKeyDown={(e) => handleKeyDown(e, index, 'romali')}
+                                style={{
+                                  width: '74px',
+                                  height: '28px',
+                                  textAlign: 'right',
+                                  fontWeight: 800,
+                                  padding: '0.15rem 0.35rem 0.15rem 22px',
+                                  fontSize: '0.86rem',
+                                  display: 'inline-block',
+                                  cursor: (
+                                    (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                    (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                  ) ? 'pointer' : 'text',
+                                  borderColor: row.romaliQty ? '#dc2626' : undefined,
+                                  backgroundColor: (
+                                    (row.status === 'LOCKED' && !unlockedSelfOrderIds.has(row.rowId)) ||
+                                    (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
+                                  ) ? '#f9fafb' : row.romaliQty ? '#fef2f2' : undefined,
+                                }}
+                                title={
                                   (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                ) ? '#f9fafb' : row.romaliQty ? '#fef2f2' : undefined,
-                              }}
-                              title={
-                                (row.orderSource === 'CUSTOMER_LINK' && !unlockedSelfOrderIds.has(row.rowId))
-                                  ? 'Customer Self-Order. Click to unlock and edit.'
-                                  : row.status === 'LOCKED'
-                                  ? 'Order is locked and cannot be edited. Use Reopen to modify.'
-                                  : romaliProduct
-                                  ? `Romali • Rate: ₹${getProductPriceForCustomer(row.customerId, romaliProduct).toFixed(2)}`
-                                  : 'Romali'
-                              }
-                            />
+                                    ? 'Customer Self-Order. Click to unlock and edit.'
+                                    : row.status === 'LOCKED'
+                                    ? 'Order is locked and cannot be edited. Use Reopen to modify.'
+                                    : romaliProduct
+                                    ? `Romali • Rate: ₹${getProductPriceForCustomer(row.customerId, romaliProduct).toFixed(2)}`
+                                    : 'Romali'
+                                }
+                              />
+                            </div>
                           </td>
                         </>
                       )}
@@ -4591,6 +5065,45 @@ export const CreateOrderPage: React.FC = () => {
                       >
                         <div>{formatCurrency(fin.rowTotal)}</div>
                       </td>
+
+                      {/* Discount Input */}
+                      {isOrderDiscountEnabled && (
+                        <td style={{ textAlign: 'right', padding: '0.12rem 0.35rem', minWidth: '80px' }}>
+                          <input
+                            ref={(el) => {
+                              inputRefs.current[`${index}_discount`] = el;
+                              if (row.customerId) {
+                                inputRefs.current[`cust_${row.customerId}_discount`] = el;
+                              }
+                            }}
+                            data-col="discount"
+                            data-customer-id={row.customerId}
+                            type="number"
+                            min="0"
+                            step="any"
+                            placeholder="0.00"
+                            className="form-input"
+                            value={row.discountAmount}
+                            onFocus={(e) => {
+                              e.target.select();
+                              if (row.customerId) fetchCustomerPricing(row.customerId);
+                            }}
+                            onChange={(e) => handleCellChange(row.rowId, 'discountAmount', e.target.value)}
+                            onKeyDown={(e) => handleKeyDown(e, index, 'discount')}
+                            style={{
+                              width: '72px',
+                              height: '28px',
+                              textAlign: 'right',
+                              fontWeight: 800,
+                              padding: '0.15rem 0.35rem',
+                              fontSize: '0.84rem',
+                              display: 'inline-block',
+                              borderColor: row.discountAmount ? '#f59e0b' : undefined,
+                            }}
+                            title="Discount / Deduction in ₹"
+                          />
+                        </td>
+                      )}
 
                       {/* Balance (Prev. Due + Bill - Paid) */}
                       <td
@@ -4782,8 +5295,416 @@ export const CreateOrderPage: React.FC = () => {
                 })
               )}
             </tbody>
+            {visibleRows.length > 0 && (
+              <tfoot
+                style={{
+                  position: 'sticky',
+                  bottom: 0,
+                  zIndex: 9,
+                  background: '#f8fafc',
+                  borderTop: '2px solid var(--border)',
+                  boxShadow: '0 -2px 8px rgba(0, 0, 0, 0.08)',
+                  fontSize: '0.78rem',
+                }}
+              >
+                <tr style={{ background: '#f8fafc' }}>
+                  {orderSort === 'CUSTOM' && isCustomEditing && <td style={{ padding: '0.45rem 0.2rem' }}></td>}
+                  <td style={{ textAlign: 'center', padding: '0.45rem 0.25rem', color: 'var(--text-muted)' }}>Σ</td>
+                  <td style={{ padding: '0.45rem 0.55rem', fontWeight: 800, color: 'var(--text-primary)' }}>
+                    {selectedRouteObj ? (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', color: 'var(--primary)' }}>
+                        <MapPin size={13} /> {selectedRouteObj.name} Total
+                      </span>
+                    ) : isFilterActive ? (
+                      'Filtered Total'
+                    ) : (
+                      'All Visible Total'
+                    )}
+                  </td>
+                  <td style={{ padding: '0.45rem 0.55rem', color: 'var(--text-muted)', fontSize: '0.73rem', fontWeight: 600 }}>
+                    {filteredStats.validShopsCount} / {visibleRows.length} shops
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '0.45rem 0.55rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                    —
+                  </td>
+                  {products.length > 0 ? (
+                    products.map((p, idx) => {
+                      const colors = ['#b45309', '#0284c7', '#7c3aed', '#059669', '#ea580c', '#e11d48'];
+                      const colColor = colors[idx % colors.length];
+                      const qty =
+                        filteredStats.productTotals[p.id] ||
+                        (kubbusProduct && p.id === kubbusProduct.id
+                          ? filteredStats.totalKubbus
+                          : romaliProduct && p.id === romaliProduct.id
+                          ? filteredStats.totalRomali
+                          : 0);
+                      return (
+                        <td key={p.id} style={{ textAlign: 'right', padding: '0.45rem 0.4rem', fontWeight: 800, color: colColor }}>
+                          {qty} <span style={{ fontSize: '0.68rem', fontWeight: 600 }}>ps</span>
+                        </td>
+                      );
+                    })
+                  ) : (
+                    <>
+                      <td style={{ textAlign: 'right', padding: '0.45rem 0.4rem', fontWeight: 800, color: '#b45309' }}>
+                        {filteredStats.totalKubbus} <span style={{ fontSize: '0.68rem', fontWeight: 600 }}>ps</span>
+                      </td>
+                      <td style={{ textAlign: 'right', padding: '0.45rem 0.4rem', fontWeight: 800, color: '#dc2626' }}>
+                        {filteredStats.totalRomali} <span style={{ fontSize: '0.68rem', fontWeight: 600 }}>ps</span>
+                      </td>
+                    </>
+                  )}
+                  <td style={{ textAlign: 'right', padding: '0.45rem 0.4rem', fontWeight: 800, color: '#16a34a' }}>
+                    {formatCurrency(filteredStats.totalCash)}
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '0.45rem 0.4rem', fontWeight: 800, color: '#2563eb' }}>
+                    {formatCurrency(filteredStats.totalGPay)}
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '0.45rem 0.55rem', fontWeight: 800, color: 'var(--text-primary)' }}>
+                    {formatCurrency(filteredStats.totalBill)}
+                  </td>
+                  {isOrderDiscountEnabled && (
+                    <td style={{ textAlign: 'right', padding: '0.45rem 0.4rem', fontWeight: 800, color: '#d97706' }}>
+                      {formatCurrency(filteredStats.totalDiscount)}
+                    </td>
+                  )}
+                  <td style={{ textAlign: 'right', padding: '0.45rem 0.55rem', fontWeight: 800, color: filteredStats.totalDue > 0 ? '#dc2626' : '#16a34a' }}>
+                    {formatCurrency(filteredStats.totalDue)}
+                  </td>
+                  <td style={{ padding: '0.45rem 0.4rem' }}></td>
+                  <td style={{ padding: '0.45rem 0.25rem' }}></td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
+
+        {/* Downside Product & Dynamic Collection Summary Bar (Active on route filter or when toggled) */}
+        {shouldShowDownside && (
+          <div
+            style={{
+              padding: '0.6rem 1rem',
+              background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+              borderTop: '2px solid var(--border)',
+              borderBottom: '1px solid var(--border)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.45rem',
+              flexShrink: 0,
+            }}
+          >
+            {/* Top row: Route Badge + Quick stats */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <span
+                  style={{
+                    background: routeFilter !== 'ALL' ? '#dbeafe' : '#e2e8f0',
+                    color: routeFilter !== 'ALL' ? '#1e40af' : '#334155',
+                    border: routeFilter !== 'ALL' ? '1px solid #93c5fd' : '1px solid #cbd5e1',
+                    borderRadius: '6px',
+                    padding: '0.2rem 0.55rem',
+                    fontSize: '0.78rem',
+                    fontWeight: 800,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                  }}
+                >
+                  <MapPin size={13} color={routeFilter !== 'ALL' ? '#2563eb' : '#64748b'} />
+                  {selectedRouteObj ? `${selectedRouteObj.name} Route` : routeFilter !== 'ALL' ? 'Selected Route' : 'All Routes Summary'}
+                </span>
+
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                  <strong>{filteredStats.validShopsCount}</strong> of <strong>{visibleRows.length}</strong> shops with orders
+                </span>
+
+                {routeFilter !== 'ALL' && (
+                  <span
+                    style={{
+                      background: '#ecfdf5',
+                      color: '#047857',
+                      border: '1px solid #a7f3d0',
+                      borderRadius: '4px',
+                      padding: '0.1rem 0.4rem',
+                      fontSize: '0.68rem',
+                      fontWeight: 700,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                    }}
+                  >
+                    Route Filter Active
+                  </span>
+                )}
+              </div>
+
+              {/* Total Pieces Badge */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <span
+                  style={{
+                    background: '#e0e7ff',
+                    color: '#3730a3',
+                    border: '1px solid #c7d2fe',
+                    borderRadius: '6px',
+                    padding: '0.2rem 0.55rem',
+                    fontSize: '0.78rem',
+                    fontWeight: 800,
+                  }}
+                >
+                  Total Dispatch: {filteredStats.totalPieces} ps
+                </span>
+                {routeFilter === 'ALL' && !isFilterActive && (
+                  <button
+                    type="button"
+                    onClick={() => setShowDownsideSummary(false)}
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: '0.1rem' }}
+                    title="Hide summary"
+                  >
+                    <X size={15} />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Bottom row: Product list breakdown + Dynamic Collection breakdown */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+                gap: '0.6rem',
+                alignItems: 'stretch',
+              }}
+            >
+              {/* Product Quantities List */}
+              <div
+                style={{
+                  background: 'var(--bg-card)',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  padding: '0.45rem 0.75rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.45rem',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.03em', marginRight: '0.25rem' }}>
+                  Total Products:
+                </span>
+
+                {products.length > 0 ? (
+                  products.map((p, idx) => {
+                    const colors = [
+                      { bg: '#fef3c7', text: '#b45309', border: '#fde68a' },
+                      { bg: '#fee2e2', text: '#dc2626', border: '#fecaca' },
+                      { bg: '#f5f3ff', text: '#7c3aed', border: '#ddd6fe' },
+                      { bg: '#ecfdf5', text: '#059669', border: '#a7f3d0' },
+                      { bg: '#ffedd5', text: '#ea580c', border: '#fed7aa' },
+                    ];
+                    const c = colors[idx % colors.length];
+                    const qty =
+                      filteredStats.productTotals[p.id] ||
+                      (kubbusProduct && p.id === kubbusProduct.id
+                        ? filteredStats.totalKubbus
+                        : romaliProduct && p.id === romaliProduct.id
+                        ? filteredStats.totalRomali
+                        : 0);
+
+                    return (
+                      <span
+                        key={p.id}
+                        style={{
+                          background: c.bg,
+                          color: c.text,
+                          border: `1px solid ${c.border}`,
+                          borderRadius: '5px',
+                          padding: '0.2rem 0.5rem',
+                          fontSize: '0.74rem',
+                          fontWeight: 700,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.25rem',
+                        }}
+                      >
+                        <span>{p.name}:</span>
+                        <strong style={{ fontSize: '0.82rem' }}>{qty}</strong>
+                        <span style={{ fontSize: '0.65rem', opacity: 0.85 }}>ps</span>
+                      </span>
+                    );
+                  })
+                ) : (
+                  <>
+                    <span
+                      style={{
+                        background: '#fef3c7',
+                        color: '#b45309',
+                        border: '1px solid #fde68a',
+                        borderRadius: '5px',
+                        padding: '0.2rem 0.5rem',
+                        fontSize: '0.74rem',
+                        fontWeight: 700,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.25rem',
+                      }}
+                    >
+                      <span>Kubbus:</span>
+                      <strong style={{ fontSize: '0.82rem' }}>{filteredStats.totalKubbus}</strong>
+                      <span style={{ fontSize: '0.65rem', opacity: 0.85 }}>ps</span>
+                    </span>
+                    <span
+                      style={{
+                        background: '#fee2e2',
+                        color: '#dc2626',
+                        border: '1px solid #fecaca',
+                        borderRadius: '5px',
+                        padding: '0.2rem 0.5rem',
+                        fontSize: '0.74rem',
+                        fontWeight: 700,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.25rem',
+                      }}
+                    >
+                      <span>Romali:</span>
+                      <strong style={{ fontSize: '0.82rem' }}>{filteredStats.totalRomali}</strong>
+                      <span style={{ fontSize: '0.65rem', opacity: 0.85 }}>ps</span>
+                    </span>
+                  </>
+                )}
+              </div>
+
+              {/* Dynamic Collections Breakdown */}
+              <div
+                style={{
+                  background: 'var(--bg-card)',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  padding: '0.45rem 0.75rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.45rem',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.03em', marginRight: '0.25rem' }}>
+                  Collections:
+                </span>
+
+                {/* Cash */}
+                <span
+                  style={{
+                    background: '#f0fdf4',
+                    color: '#16a34a',
+                    border: '1px solid #bbf7d0',
+                    borderRadius: '5px',
+                    padding: '0.2rem 0.5rem',
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.25rem',
+                  }}
+                >
+                  <span>💵 Cash:</span>
+                  <strong style={{ fontSize: '0.82rem' }}>{formatCurrency(filteredStats.totalCash)}</strong>
+                </span>
+
+                {/* GPay */}
+                <span
+                  style={{
+                    background: '#eff6ff',
+                    color: '#2563eb',
+                    border: '1px solid #bfdbfe',
+                    borderRadius: '5px',
+                    padding: '0.2rem 0.5rem',
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.25rem',
+                  }}
+                >
+                  <span>📱 GPay:</span>
+                  <strong style={{ fontSize: '0.82rem' }}>{formatCurrency(filteredStats.totalGPay)}</strong>
+                </span>
+
+                {/* Discount */}
+                {isOrderDiscountEnabled && filteredStats.totalDiscount > 0 && (
+                  <span
+                    style={{
+                      background: '#fef3c7',
+                      color: '#b45309',
+                      border: '1px solid #fde68a',
+                      borderRadius: '5px',
+                      padding: '0.2rem 0.5rem',
+                      fontSize: '0.74rem',
+                      fontWeight: 700,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.25rem',
+                    }}
+                    title="Total Discount / Deductions"
+                  >
+                    <span>🏷️ Disc:</span>
+                    <strong style={{ fontSize: '0.82rem' }}>{formatCurrency(filteredStats.totalDiscount)}</strong>
+                  </span>
+                )}
+
+                {/* Total Collection */}
+                <span
+                  style={{
+                    background: '#ecfdf5',
+                    color: '#065f46',
+                    border: '1.5px solid #10b981',
+                    borderRadius: '5px',
+                    padding: '0.2rem 0.55rem',
+                    fontSize: '0.74rem',
+                    fontWeight: 800,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.25rem',
+                  }}
+                  title="Total Cash + GPay Collected"
+                >
+                  <span>Total Collected:</span>
+                  <strong style={{ fontSize: '0.84rem' }}>{formatCurrency(filteredStats.totalCash + filteredStats.totalGPay)}</strong>
+                </span>
+
+                {/* Total Billed */}
+                <span
+                  style={{
+                    background: '#f8fafc',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '5px',
+                    padding: '0.2rem 0.5rem',
+                    fontSize: '0.74rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  Bill: <strong>{formatCurrency(filteredStats.totalBill)}</strong>
+                </span>
+
+                {/* Due Balance */}
+                {filteredStats.totalDue > 0 && (
+                  <span
+                    style={{
+                      background: '#fff1f2',
+                      color: '#e11d48',
+                      border: '1px solid #fecdd3',
+                      borderRadius: '5px',
+                      padding: '0.2rem 0.5rem',
+                      fontSize: '0.74rem',
+                      fontWeight: 700,
+                    }}
+                  >
+                    Due: <strong>{formatCurrency(filteredStats.totalDue)}</strong>
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Bottom Controls Bar (Permanently docked inside table container) */}
         <div
@@ -4809,6 +5730,26 @@ export const CreateOrderPage: React.FC = () => {
               <Plus size={13} />
               <span>+ Custom Row</span>
             </button>
+
+            {routeFilter === 'ALL' && !isFilterActive && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowDownsideSummary((prev) => !prev)}
+                style={{
+                  height: '28px',
+                  padding: '0 0.55rem',
+                  fontSize: '0.75rem',
+                  color: shouldShowDownside ? 'var(--primary)' : 'var(--text-secondary)',
+                  borderColor: shouldShowDownside ? 'var(--primary)' : undefined,
+                  background: shouldShowDownside ? '#eff6ff' : undefined,
+                }}
+                title="Toggle bottom product totals and collections summary"
+              >
+                <BarChart2 size={12} />
+                <span>{shouldShowDownside ? 'Hide Bottom Summary' : 'Bottom Summary'}</span>
+              </button>
+            )}
 
             {removedCount > 0 && (
               <button
