@@ -1,5 +1,11 @@
-import { apiClient } from './apiClient';
+import { api } from './client';
 import { Order } from '../types';
+
+export interface OrderItemInput {
+  product_id: string;
+  quantity: number;
+  unit_price?: string;
+}
 
 export interface CreateOrderPayload {
   customer_id: string;
@@ -9,22 +15,14 @@ export interface CreateOrderPayload {
   shop_expense?: string;
   shop_expense_notes?: string;
   notes?: string;
-  items: Array<{
-    product_id: string;
-    quantity: number;
-    unit_price?: string;
-  }>;
+  items: OrderItemInput[];
 }
 
 export interface UpdateOrderPayload {
   customer_id?: string;
   order_date?: string;
   order_number?: string;
-  items?: Array<{
-    product_id: string;
-    quantity: number;
-    unit_price?: string;
-  }>;
+  items?: OrderItemInput[];
   driver_id?: string | null;
   route_id?: string | null;
   shop_expense?: string;
@@ -32,25 +30,36 @@ export interface UpdateOrderPayload {
   notes?: string;
 }
 
-export const orderService = {
-  async getOrders(params?: {
-    route?: string;
-    status?: string;
-    date?: string;
-    customer?: string;
-    search?: string;
-    all?: string;
-    page_size?: string;
-  }): Promise<Order[]> {
-    const queryParams: Record<string, string | undefined> = { all: 'true', page_size: '2000', ...params };
-    const data = await apiClient.get<{ results?: Order[]; next?: string | null } | Order[]>('/orders/', queryParams);
+export interface OrderFilterParams {
+  route?: string;
+  status?: string;
+  date?: string;
+  customer?: string;
+  search?: string;
+  all?: boolean;
+}
+
+export const ordersApi = {
+  async getOrders(params?: OrderFilterParams): Promise<Order[]> {
+    const queryParams: Record<string, string | boolean | undefined> = {
+      all: 'true',
+      page_size: '2000',
+      route: params?.route,
+      status: params?.status,
+      date: params?.date,
+      customer: params?.customer,
+      search: params?.search,
+    };
+
+    const data = await api.get<{ results?: Order[]; next?: string | null } | Order[]>('/orders/', queryParams);
     let items = Array.isArray(data) ? data : data.results || [];
     let nextUrl = !Array.isArray(data) ? data.next : null;
+
     while (nextUrl) {
       try {
         const parsed = new URL(nextUrl, window.location.origin);
         const endpoint = parsed.pathname.replace(/^\/api\/v1/, '') + parsed.search;
-        const pageRes: any = await apiClient.get(endpoint);
+        const pageRes: any = await api.get(endpoint);
         if (Array.isArray(pageRes)) {
           items = items.concat(pageRes);
           break;
@@ -68,27 +77,26 @@ export const orderService = {
   },
 
   async getOrder(id: string): Promise<Order> {
-    return apiClient.get<Order>(`/orders/${id}/`);
+    return api.get<Order>(`/orders/${id}/`);
   },
 
   async createOrder(payload: CreateOrderPayload): Promise<Order> {
-    return apiClient.post<Order>('/orders/', payload);
+    return api.post<Order>('/orders/', payload);
   },
 
   async updateOrder(id: string, payload: UpdateOrderPayload): Promise<Order> {
-    return apiClient.patch<Order>(`/orders/${id}/`, payload);
+    return api.patch<Order>(`/orders/${id}/`, payload);
   },
 
   async updateOrderStatus(id: string, status: string): Promise<Order> {
-    return apiClient.patch<Order>(`/orders/${id}/`, { status });
+    return api.patch<Order>(`/orders/${id}/`, { status });
   },
 
   async reopenOrder(id: string, reason: string): Promise<Order> {
-    return apiClient.post<Order>(`/orders/${id}/reopen/`, { reason });
+    return api.post<Order>(`/orders/${id}/reopen/`, { reason });
   },
 
   async deleteOrder(id: string): Promise<void> {
-    return apiClient.delete(`/orders/${id}/`);
+    return api.delete<void>(`/orders/${id}/`);
   },
 };
-
